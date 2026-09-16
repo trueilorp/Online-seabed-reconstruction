@@ -10,12 +10,12 @@ singolo convex hull, adatto solo a forme compatte genus-0), PPSurf lavora
 localmente patch per patch -- strutturalmente adatto a superfici APERTE e
 allungate come uno scan sonar multibeam "a nastro".
 
-Nota architetturale (stessa di pipeline_neurale_point2mesh.py): questo
-script gira nell'ambiente conda "ricostruzione3d" (Open3D, per riusare
-mesh_builder.py), mentre PPSurf richiede l'ambiente separato "pps"
-(Python 3.11, PyTorch 2.4 + CUDA 12.4, PyTorch Lightning, PyTorch Geometric).
-Il cuore della ricostruzione (repo_esterni/ppsurf/pps.py) viene quindi
-lanciato come sottoprocesso con l'interprete dell'ambiente "pps".
+Nota architetturale (stessa di scripts/point2mesh.py): questo script gira
+nell'ambiente conda "ricostruzione3d" (Open3D, per riusare utils/mesh.py),
+mentre PPSurf richiede l'ambiente separato "pps" (Python 3.11, PyTorch 2.4
++ CUDA 12.4, PyTorch Lightning, PyTorch Geometric). Il cuore della
+ricostruzione (helpers/ppsurf/pps.py) viene quindi lanciato come
+sottoprocesso con l'interprete dell'ambiente "pps".
 
 Parametri scoperti a mano durante lo smoke test (passo 4), necessari per
 girare sulla GPU da 4GB VRAM senza andare in CUDA OutOfMemoryError -- la
@@ -30,15 +30,13 @@ che consuma piu' memoria, indipendentemente dal numero di punti in input:
     anche con la risoluzione ridotta a 129)
 
 Dipendenze:
-    ambiente "ricostruzione3d": open3d, numpy, pandas (vedi mesh_builder.py)
-    ambiente "pps": vedi repo_esterni/ppsurf/pps.yml
+    ambiente "ricostruzione3d": open3d, numpy, pandas (vedi utils/mesh.py)
+    ambiente "pps": vedi helpers/ppsurf/pps.yml
     modello pre-addestrato ppsurf_50nn (scaricato automaticamente da pps.py
-        rec al primo utilizzo, in repo_esterni/ppsurf/models/)
+        rec al primo utilizzo, in helpers/ppsurf/models/)
 
-Uso:
-    conda activate ricostruzione3d
-    cd scripts
-    python pipeline_neurale_ppsurf.py
+I parametri di questa pipeline sono in config/config.yaml (sezione
+ppsurf); l'esecuzione avviene tramite main.py nella root del progetto.
 """
 
 import glob
@@ -49,54 +47,12 @@ import time
 
 import open3d as o3d
 
-from mesh_builder import (
-    carica_point_cloud,
-    pulisci_point_cloud,
-    stima_normali,
-    valuta_mesh,
-    stampa_metriche,
-    salva_metriche_csv,
-)
-
-# --- Imposta qui i parametri, stesso stile di mesh_builder.py ---
-INPUT_CSV = "../dati/sonar/OS3D_Max_Range_Test.csv"  # percorso al CSV da ricostruire
-ESCLUDI_CLASSI = [2]                        # valori di 'classification' da escludere
-ALTITUDE_MIN = None                         # tieni solo punti con altitude >= questo valore (None = nessun limite)
-ALTITUDE_MAX = None                         # tieni solo punti con altitude <= questo valore (None = nessun limite)
-NB_NEIGHBORS = 20                           # filtro outlier: quanti vicini considerare per punto
-STD_RATIO = 2.0                             # filtro outlier: soglia in deviazioni standard
-ESCLUDI_ZONA_X = (-420, -380)               # tuple (min, max) per escludere una zona rettangolare X (sosta barca)
-ESCLUDI_ZONA_Z = (5590, 5650)               # tuple (min, max) per escludere una zona rettangolare Z (sosta barca)
-VOXEL_SIZE = 0.5                            # dimensione voxel per downsampling in metri
-OUTPUT_MESH = "../output/mesh/mesh_ppsurf.ply"      # percorso file mesh di output
-METRICHE_CSV = "../output/metriche_ricostruzione.csv"  # file dove accumulare le metriche di ogni run
-CALCOLA_AUTOINTERSEZIONI = False            # True = controllo completo (lento su mesh grandi)
-MAX_PUNTI_FEDELTA = 50_000                  # numero massimo di punti usati per il calcolo di fedeltà (raycasting)
-
-# --- Parametri specifici di PPSurf ---
-# Il README di PPSurf consiglia di sub-campionare point cloud molto grandi a
-# ~250k punti; il nostro dataset pulito (~197k punti) rientra gia' sotto
-# questa soglia, quindi di default NON viene applicato alcun subsample
-# aggressivo (a differenza di Point2Mesh, dove era indispensabile) -- questo
-# e' uno dei vantaggi strutturali di un metodo patch-based. MAX_PUNTI_PPSURF
-# resta comunque come rete di sicurezza per dataset futuri piu' grandi.
-MAX_PUNTI_PPSURF = 250_000
-GEN_RESOLUTION_GLOBAL = 129                 # risoluzione griglia marching cubes (default 257 va in OOM su 4GB)
-REC_BATCH_SIZE = 10000                      # chunk size valutazione griglia (default 50000 va in OOM su 4GB)
-
-REPO_ESTERNI = "../repo_esterni"
-PPSURF_DIR = os.path.join(REPO_ESTERNI, "ppsurf")
-PPSURF_CONDA_ENV = "pps"                    # nome dell'ambiente conda dedicato a PPSurf
-WORK_DIR = "../output/ppsurf_tmp"           # point cloud/risultati temporanei scambiati col sottoprocesso
-
 
 # ---------------------------------------------------------------------------
 # UTILITA'
 # ---------------------------------------------------------------------------
 
-def trova_python_ambiente_conda(nome_ambiente: str) -> str:
-    """Risolve il path dell'interprete python di un ambiente conda dato il nome,
-    senza richiedere che sia attivo nella shell corrente."""
+def trova_python_ambiente_conda(nome_ambiente: str, ppsurf_dir: str) -> str:
     risultato = subprocess.run(
         ["conda", "env", "list", "--json"], capture_output=True, text=True, check=True
     )
@@ -109,7 +65,7 @@ def trova_python_ambiente_conda(nome_ambiente: str) -> str:
             return python_bin
     raise RuntimeError(
         f"Ambiente conda '{nome_ambiente}' non trovato. Crealo con: "
-        f"conda env create -f {PPSURF_DIR}/pps.yml"
+        f"conda env create -f {ppsurf_dir}/pps.yml"
     )
 
 
@@ -146,15 +102,16 @@ def esporta_point_cloud_ppsurf(pcd: o3d.geometry.PointCloud, percorso_output_ply
 # ---------------------------------------------------------------------------
 
 def ricostruisci_ppsurf(pcd: o3d.geometry.PointCloud, nome_run: str,
+                         ppsurf_dir: str, conda_env: str, work_dir: str,
                          gen_resolution_global: int = 129, rec_batch_size: int = 10000):
     """Lancia la ricostruzione PPSurf (comando 'rec', con il modello pre-addestrato
     50NN) come sottoprocesso nell'ambiente conda 'pps'.
 
     Ritorna (mesh_o3d, tempo_calcolo_secondi).
     """
-    python_ppsurf = trova_python_ambiente_conda(PPSURF_CONDA_ENV)
+    python_ppsurf = trova_python_ambiente_conda(conda_env, ppsurf_dir)
 
-    cartella_lavoro = os.path.abspath(os.path.join(WORK_DIR, nome_run))
+    cartella_lavoro = os.path.abspath(os.path.join(work_dir, nome_run))
     os.makedirs(cartella_lavoro, exist_ok=True)
 
     percorso_pc = os.path.join(cartella_lavoro, f"{nome_run}.ply")
@@ -176,12 +133,12 @@ def ricostruisci_ppsurf(pcd: o3d.geometry.PointCloud, nome_run: str,
     env_sottoprocesso = os.environ.copy()
     env_sottoprocesso["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    print(f"\n[PPSurf] Lancio sottoprocesso nell'ambiente '{PPSURF_CONDA_ENV}' "
+    print(f"\n[PPSurf] Lancio sottoprocesso nell'ambiente '{conda_env}' "
           f"(puo' richiedere diversi minuti)...")
     print(f"  {' '.join(cmd)}")
 
     inizio = time.time()
-    risultato = subprocess.run(cmd, cwd=PPSURF_DIR, env=env_sottoprocesso,
+    risultato = subprocess.run(cmd, cwd=ppsurf_dir, env=env_sottoprocesso,
                                 capture_output=True, text=True)
     tempo_calcolo = time.time() - inizio
 
@@ -211,36 +168,3 @@ def ricostruisci_ppsurf(pcd: o3d.geometry.PointCloud, nome_run: str,
     print(f"[PPSurf] Mesh ricostruita: {len(mesh.vertices)} vertici, {len(mesh.triangles)} triangoli")
 
     return mesh, tempo_calcolo
-
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
-
-def main():
-    pcd = carica_point_cloud(INPUT_CSV, classi_da_escludere=ESCLUDI_CLASSI,
-                              altitude_min=ALTITUDE_MIN, altitude_max=ALTITUDE_MAX,
-                              escludi_zona_x=ESCLUDI_ZONA_X, escludi_zona_z=ESCLUDI_ZONA_Z)
-    pcd = pulisci_point_cloud(pcd, voxel_size=VOXEL_SIZE, nb_neighbors=NB_NEIGHBORS, std_ratio=STD_RATIO)
-    pcd = sottocampiona_se_necessario(pcd, MAX_PUNTI_PPSURF)
-    pcd = stima_normali(pcd)  # non usato da PPSurf (vedi esporta_point_cloud_ppsurf), mantenuto per coerenza
-
-    nome_run = os.path.splitext(os.path.basename(INPUT_CSV))[0]
-    mesh, tempo_calcolo = ricostruisci_ppsurf(
-        pcd, nome_run, gen_resolution_global=GEN_RESOLUTION_GLOBAL, rec_batch_size=REC_BATCH_SIZE,
-    )
-
-    os.makedirs(os.path.dirname(OUTPUT_MESH), exist_ok=True)
-    o3d.io.write_triangle_mesh(OUTPUT_MESH, mesh)
-    print(f"\nMesh salvata in: {OUTPUT_MESH}")
-
-    metriche = valuta_mesh(mesh, pcd, tempo_calcolo=tempo_calcolo, nome_metodo="ppsurf",
-                            max_punti_fedelta=MAX_PUNTI_FEDELTA,
-                            calcola_autointersezioni=CALCOLA_AUTOINTERSEZIONI)
-    stampa_metriche(metriche)
-    salva_metriche_csv(metriche, percorso_csv=METRICHE_CSV,
-                        input_csv=INPUT_CSV, voxel_size=VOXEL_SIZE, escludi_classi=ESCLUDI_CLASSI)
-
-
-if __name__ == "__main__":
-    main()

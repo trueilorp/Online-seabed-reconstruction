@@ -2,8 +2,8 @@
 Analisi esplorativa di un CSV di point cloud (sonar/LiDAR)
 =============================================================
 
-Uso:
-    python analisi_csv_point_cloud.py --input OS3D_Max_Range_Test.csv
+Uso (dalla root del progetto):
+    python data/data_analisys.py
 
 Dipendenze:
     pip install pandas numpy matplotlib
@@ -14,8 +14,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # --- Imposta qui i parametri, invece che da riga di comando ---
-PERCORSO_CSV = "../dati/sonar/ShallowShorelineSurveyPoints.csv"   # percorso al file CSV da analizzare
-OUTPUT_PREFIX = "../output/analisi"                   # prefisso per il file del grafico salvato
+PERCORSO_CSV = "data/sonar/ShallowShorelineSurveyPoints.csv"   # percorso al file CSV da analizzare
+OUTPUT_PREFIX = "output/analisi"                   # prefisso per il file del grafico salvato
 
 
 def analizza(percorso_csv: str, output_prefix: str = "analisi"):

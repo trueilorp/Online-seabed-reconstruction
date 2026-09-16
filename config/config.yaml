@@ -1,0 +1,47 @@
+algorithm: "poisson"
+
+paths:
+  input_csv: "data/sonar/OS3D_Max_Range_Test.csv"
+  ground_truth_mesh: null            # opzionale: mesh .obj/.ply di riferimento per il confronto
+  output_mesh_dir: "output/mesh"     # il nome file viene generato come mesh_<algoritmo>.ply
+  metriche_csv: "output/metriche_ricostruzione.csv"
+  repo_esterni: "helpers"            # root dei repo esterni (point2mesh, Manifold, ppsurf)
+
+preprocessing:
+  escludi_classi: [2]                # valori di 'classification' da escludere; [] per non escludere nulla
+  altitude_min: null                 # tieni solo punti con altitude >= questo valore (null = nessun limite)
+  altitude_max: null                 # tieni solo punti con altitude <= questo valore (null = nessun limite)
+  escludi_zona_x: null               # [min, max] per escludere una zona rettangolare X (es. sosta barca)
+  escludi_zona_z: null               # [min, max] per escludere una zona rettangolare Z (es. sosta barca)
+  voxel_size: 0.5                    # dimensione voxel per downsampling in metri (null = stimato automaticamente)
+  nb_neighbors: 20                   # filtro outlier: quanti vicini considerare per punto
+  std_ratio: 2.0                     # filtro outlier: soglia in deviazioni standard
+  raggio_ricerca_normali: 0.1        # raggio di ricerca per la stima delle normali
+  max_vicini_normali: 30             # numero massimo di vicini usati per la stima delle normali
+
+valutazione:
+  calcola_autointersezioni: false    # true = controllo completo (lento su mesh grandi)
+  max_punti_fedelta: 50000           # numero massimo di punti usati per il calcolo di fedeltà (raycasting)
+
+visualizza: false                    # apre una finestra 3D col risultato a fine esecuzione
+
+poisson:
+  profondita: 9                      # risoluzione octree Poisson (8-10 tipico)
+  rimuovi_bassa_densita: 0.02        # percentile di vertici a bassa densità da rimuovere
+  dimensione_min_componente: 100     # pulizia mesh: componenti connesse più piccole vengono rimosse
+
+point2mesh:
+  max_punti: 8000                    # subsample aggressivo dopo pulizia (GPU 4GB VRAM)
+  iterations: 1500                   # iterazioni di ottimizzazione
+  export_interval: 100               # ogni quante iterazioni esportare una mesh intermedia
+  initial_mesh_faces: 2000           # facce target per la mesh iniziale (convex hull semplificato)
+  manifold_res: 20000                # risoluzione octree usata dal software Manifold per il remesh
+  conda_env: "point2mesh"            # nome dell'ambiente conda dedicato
+  work_dir: "output/point2mesh_tmp"  # file temporanei scambiati col sottoprocesso
+
+ppsurf:
+  max_punti: 250000                  # rete di sicurezza per dataset molto grandi (soglia consigliata dal README)
+  gen_resolution_global: 129         # risoluzione griglia marching cubes (default 257 va in OOM su 4GB)
+  rec_batch_size: 10000              # chunk size valutazione griglia (default 50000 va in OOM su 4GB)
+  conda_env: "pps"                   # nome dell'ambiente conda dedicato
+  work_dir: "output/ppsurf_tmp"      # file temporanei scambiati col sottoprocesso
