@@ -2,7 +2,7 @@
 Entry point della pipeline di ricostruzione 3D da point cloud sonar.
 
 Legge config/config.yaml, dove la chiave "algorithm" seleziona quale
-ricostruzione eseguire ("poisson", "point2mesh" o "ppsurf"). Il
+ricostruzione eseguire ("poisson", "point2mesh", "ppsurf" o "sa_convonet"). Il
 preprocessing (caricamento CSV, pulizia, normali) e la valutazione finale
 sono condivisi da tutti gli algoritmi; ogni algoritmo usa solo la propria
 sezione di config per i parametri specifici.
@@ -39,6 +39,7 @@ from scripts.ppsurf import (
 	sottocampiona_se_necessario,
 	ricostruisci_ppsurf,
 )
+from scripts.sa_convonet import ricostruisci_sa_convonet
 
 CONFIG_PATH = "config/config.yaml"
 
@@ -138,10 +139,29 @@ def esegui_ppsurf(pcd: o3d.geometry.PointCloud, config: dict):
 	return mesh, pcd, tempo_calcolo, "ppsurf"
 
 
+def esegui_sa_convonet(pcd: o3d.geometry.PointCloud, config: dict):
+	sac = config["sa_convonet"]
+	paths = config["paths"]
+
+	pcd = stima_normali_da_config(pcd, config)
+
+	nome_run = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
+	sa_convonet_dir = os.path.join(paths["neural_methods"], "SA-ConvONet")
+
+	mesh, tempo_calcolo = ricostruisci_sa_convonet(
+		pcd, nome_run,
+		sa_convonet_dir=sa_convonet_dir, conda_env=sac["conda_env"], work_dir=sac["work_dir"],
+		config_file=sac["config_file"],
+		unit_size=sac["unit_size"], query_vol_size=sac["query_vol_size"],
+	)
+	return mesh, pcd, tempo_calcolo, "sa_convonet"
+
+
 ESECUTORI = {
 	"poisson": esegui_poisson,
 	"point2mesh": esegui_point2mesh,
 	"ppsurf": esegui_ppsurf,
+	"sa_convonet": esegui_sa_convonet,
 }
 
 

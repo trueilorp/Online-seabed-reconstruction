@@ -16,7 +16,7 @@ Dipendenze:
 import open3d as o3d
 
 # --- Imposta qui il file da aprire ---
-PERCORSO_MESH = "../output/mesh/mesh_ppsurf.ply"
+PERCORSO_MESH = "../output/mesh/mesh_sa_convonet.ply"
 MOSTRA_WIREFRAME = False   # True per vedere anche gli spigoli dei triangoli sovrapposti
 CARTELLA_SCREENSHOT = "../output/screenshot_mesh"   # cartella dove salvare le immagini (creata se non esiste)
 

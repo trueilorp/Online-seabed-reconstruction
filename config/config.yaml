@@ -1,4 +1,4 @@
-algorithm: "poisson"
+algorithm: "sa_convonet"
 
 paths:
   input_csv: "data/sonar/OS3D_Max_Range_Test.csv"
@@ -6,6 +6,7 @@ paths:
   output_mesh_dir: "output/mesh"     # il nome file viene generato come mesh_<algoritmo>.ply
   metriche_csv: "output/metriche_ricostruzione.csv"
   repo_esterni: "helpers"            # root dei repo esterni (point2mesh, Manifold, ppsurf)
+  neural_methods: "neural_methods"   # root dei repo neurali piu' recenti (SA-ConvONet, ...)
 
 preprocessing:
   escludi_classi: [2]                # valori di 'classification' da escludere; [] per non escludere nulla
@@ -45,3 +46,17 @@ ppsurf:
   rec_batch_size: 10000              # chunk size valutazione griglia (default 50000 va in OOM su 4GB)
   conda_env: "pps"                   # nome dell'ambiente conda dedicato
   work_dir: "output/ppsurf_tmp"      # file temporanei scambiati col sottoprocesso
+
+sa_convonet:
+  config_file: "configs/pointcloud_crop/sonar.yaml"  # config SA-ConvONet (relativo alla cartella del repo)
+  conda_env: "sa_conet"              # nome dell'ambiente conda dedicato
+  work_dir: "output/sa_convonet_tmp" # file temporanei scambiati col sottoprocesso
+  # Generazione a finestre scorrevoli: ogni crop copre (unit_size * query_vol_size)
+  # unita' normalizzate. Il nostro transetto sonar e' molto piu' esteso (centinaia
+  # di metri) di una stanza Matterport (10-20m, dati di riferimento del modello
+  # pre-addestrato): con i default del repo (0.002 * 25 = 0.05) risultavano
+  # ~2220 crop da processare in sequenza (2+ ore senza terminare). Questi valori
+  # (0.005 * 25 = 0.125) li portano a ~140, al costo di una mesh piu' grossolana --
+  # da affinare una volta verificato che la catena funzioni end-to-end.
+  unit_size: 0.005
+  query_vol_size: 25
