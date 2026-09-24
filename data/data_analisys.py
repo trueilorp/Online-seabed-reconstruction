@@ -9,13 +9,15 @@ Dipendenze:
     pip install pandas numpy matplotlib
 """
 
+import os
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 # --- Imposta qui i parametri, invece che da riga di comando ---
-PERCORSO_CSV = "data/sonar/ShallowShorelineSurveyPoints.csv"   # percorso al file CSV da analizzare
-OUTPUT_PREFIX = "output/analisi"                   # prefisso per il file del grafico salvato
+PERCORSO_CSV = "data/sonar/Terrain_unity.csv"   # percorso al file CSV da analizzare
+OUTPUT_PREFIX = "output/analysis"                   # prefisso per il file del grafico salvato
 
 
 def analizza(percorso_csv: str, output_prefix: str = "analisi"):
@@ -84,7 +86,7 @@ def analizza(percorso_csv: str, output_prefix: str = "analisi"):
 
     # --- Figura riassuntiva con più pannelli ---
     fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    fig.suptitle(f"Analisi esplorativa: {percorso_csv}", fontsize=14)
+    fig.suptitle(f"{percorso_csv}", fontsize=14)
 
     # Vista dall'alto (X-Z, tipica per un fondale con Y=verticale)
     sc = axes[0, 0].scatter(x, z, s=1, c=y, cmap="viridis")
@@ -144,7 +146,7 @@ def analizza(percorso_csv: str, output_prefix: str = "analisi"):
     plt.colorbar(h2[3], ax=axes[1, 3], label="punti per cella")
 
     plt.tight_layout()
-    output_path = f"{output_prefix}_riepilogo.png"
+    output_path = os.path.join(output_prefix, f"{os.path.basename(PERCORSO_CSV)}_analysis.png")
     plt.savefig(output_path, dpi=150)
     print(f"\nGrafico riassuntivo salvato in: {output_path}")
 

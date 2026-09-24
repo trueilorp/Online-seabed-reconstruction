@@ -212,19 +212,37 @@ def stampa_metriche(metriche: dict):
 		print(f"  tempo di calcolo    : {metriche['tempo_calcolo_secondi']:.2f} s")
 
 
+# metriche calcolate e stampate da valuta_mesh ma non salvate nel CSV (poco utili nell'analisi)
+COLONNE_ESCLUSE_CSV = [
+	"n_triangoli", "watertight", "edge_manifold", "vertex_manifold",
+	"n_triangoli_autointersecanti", "percentuale_autointersecanti",
+	"area_triangolo_media", "coeff_variazione_aree",
+]
+
+
 def salva_metriche_csv(metriche: dict, percorso_csv: str = "../output/metriche_ricostruzione.csv",
-						input_csv: str = None, voxel_size=None, escludi_classi: list = None):
+						input_csv: str = None, voxel_size=None, escludi_classi: list = None,
+						parametri: dict = None):
 	import datetime
 
-	riga = dict(metriche)
+	riga = {k: v for k, v in metriche.items() if k not in COLONNE_ESCLUSE_CSV}
 	riga["timestamp"] = datetime.datetime.now().isoformat(timespec="seconds")
 	riga["input_csv"] = input_csv
 	riga["voxel_size"] = voxel_size if voxel_size is not None else "auto"
 	riga["escludi_classi"] = str(escludi_classi)
+	riga.update(parametri or {})
 
 	df_riga = pd.DataFrame([riga])
-	file_esiste = os.path.isfile(percorso_csv)
-	df_riga.to_csv(percorso_csv, mode="a", header=not file_esiste, index=False)
+	if os.path.isfile(percorso_csv):
+		# letto come testo: le righe vecchie vengono riscritte identiche (niente 234231 -> 234231.0)
+		df_esistente = pd.read_csv(percorso_csv, dtype=str, keep_default_na=False)
+		if list(df_esistente.columns) == list(df_riga.columns):
+			df_riga.to_csv(percorso_csv, mode="a", header=False, index=False)
+		else:
+			# colonne diverse (es. metriche ground truth aggiunte/assenti): riscrive il file con l'unione delle colonne
+			pd.concat([df_esistente, df_riga.astype(object)], ignore_index=True).to_csv(percorso_csv, index=False)
+	else:
+		df_riga.to_csv(percorso_csv, index=False)
 	print(f"Metriche aggiunte a: {percorso_csv}")
 
 def confronta_con_ground_truth(mesh: o3d.geometry.TriangleMesh,

@@ -2,3 +2,4 @@ output/
 helpers/
 neural_methods/
 *__pycache__/
+data/

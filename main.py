@@ -104,8 +104,8 @@ def esegui_point2mesh(pcd: o3d.geometry.PointCloud, config: dict):
 	pcd = stima_normali_da_config(pcd, config)
 
 	nome_run = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
-	point2mesh_dir = os.path.join(paths["repo_esterni"], "point2mesh")
-	manifold_dir = os.path.join(paths["repo_esterni"], "Manifold", "build")
+	point2mesh_dir = os.path.join(paths["neural_methods"], "point2mesh")
+	manifold_dir = os.path.join(paths["neural_methods"], "Manifold", "build")
 
 	mesh, tempo_calcolo, loss_per_iterazione = ricostruisci_point2mesh(
 		pcd, nome_run,
@@ -128,7 +128,7 @@ def esegui_ppsurf(pcd: o3d.geometry.PointCloud, config: dict):
 	pcd = stima_normali_da_config(pcd, config)  # non usato da PPSurf, mantenuto per coerenza col preprocessing
 
 	nome_run = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
-	ppsurf_dir = os.path.join(paths["repo_esterni"], "ppsurf")
+	ppsurf_dir = os.path.join(paths["neural_methods"], "ppsurf")
 
 	mesh, tempo_calcolo = ricostruisci_ppsurf(
 		pcd, nome_run,
@@ -157,6 +157,33 @@ def esegui_sa_convonet(pcd: o3d.geometry.PointCloud, config: dict):
 	return mesh, pcd, tempo_calcolo, "sa_convonet"
 
 
+# chiavi di config che non sono parametri della ricostruzione (percorsi, ambienti, logging)
+CHIAVI_NON_PARAMETRI = {"conda_env", "work_dir", "export_interval", "config_file"}
+
+
+def raccogli_parametri(config: dict) -> dict:
+	"""Parametri della run da salvare nel CSV: preprocessing, valutazione e sezione del metodo usato."""
+	def formatta(valore):
+		if valore is None:
+			return "nessuno"  # "null" in config (nessun limite/filtro); non "null", che pandas rilegge come cella vuota
+		if isinstance(valore, (list, tuple)):
+			return str(list(valore))
+		return valore
+
+	algorithm = config["algorithm"]
+	parametri = {}
+	for chiave, valore in config["preprocessing"].items():
+		# voxel_size ed escludi_classi hanno gia' colonne dedicate (presenti anche nelle righe vecchie)
+		if chiave not in ("voxel_size", "escludi_classi"):
+			parametri[f"pre_{chiave}"] = formatta(valore)
+	for chiave, valore in config["valutazione"].items():
+		parametri[f"val_{chiave}"] = formatta(valore)
+	for chiave, valore in config.get(algorithm, {}).items():
+		if chiave not in CHIAVI_NON_PARAMETRI:
+			parametri[f"{algorithm}_{chiave}"] = formatta(valore)
+	return parametri
+
+
 ESECUTORI = {
 	"poisson": esegui_poisson,
 	"point2mesh": esegui_point2mesh,
@@ -176,8 +203,10 @@ def main():
 	pre = config["preprocessing"]
 	valutazione = config["valutazione"]
 
-	os.makedirs(paths["output_mesh_dir"], exist_ok=True)
-	percorso_output = os.path.join(paths["output_mesh_dir"], f"mesh_{nome_metodo}.ply")
+	nome_dataset = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
+	cartella_output = os.path.join(paths["output_mesh_dir"], nome_dataset)
+	os.makedirs(cartella_output, exist_ok=True)
+	percorso_output = os.path.join(cartella_output, f"mesh_{nome_metodo}.ply")
 	o3d.io.write_triangle_mesh(percorso_output, mesh)
 	print(f"\nMesh salvata in: {percorso_output}")
 
@@ -187,14 +216,16 @@ def main():
 		calcola_autointersezioni=valutazione["calcola_autointersezioni"],
 	)
 	stampa_metriche(metriche)
+
+	if paths["ground_truth_mesh"]:
+		metriche_gt = confronta_con_ground_truth(mesh, paths["ground_truth_mesh"])
+		metriche.update({f"gt_{k}": v for k, v in metriche_gt.items()})
+
 	salva_metriche_csv(
 		metriche, percorso_csv=paths["metriche_csv"],
 		input_csv=paths["input_csv"], voxel_size=pre["voxel_size"],
-		escludi_classi=pre["escludi_classi"],
+		escludi_classi=pre["escludi_classi"], parametri=raccogli_parametri(config),
 	)
-
-	if paths["ground_truth_mesh"]:
-		confronta_con_ground_truth(mesh, paths["ground_truth_mesh"])
 
 	if config["visualizza"]:
 		o3d.visualization.draw_geometries([mesh], mesh_show_back_face=True)

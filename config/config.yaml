@@ -1,15 +1,14 @@
-algorithm: "sa_convonet"
+algorithm: "ppsurf"  # "poisson", "point2mesh", "ppsurf", "sa_convonet"
 
 paths:
-  input_csv: "data/sonar/OS3D_Max_Range_Test.csv"
-  ground_truth_mesh: null            # opzionale: mesh .obj/.ply di riferimento per il confronto
-  output_mesh_dir: "output/mesh"     # il nome file viene generato come mesh_<algoritmo>.ply
-  metriche_csv: "output/metriche_ricostruzione.csv"
-  repo_esterni: "helpers"            # root dei repo esterni (point2mesh, Manifold, ppsurf)
+  input_csv: "data/sonar/Terrain_unity.csv"
+  ground_truth_mesh: "data/sonar/Terrain_ground_truth.obj"            # opzionale: mesh .obj/.ply di riferimento per il confronto
+  output_mesh_dir: "output/mesh"     # il file viene salvato come <dataset>/mesh_<algoritmo>.ply (dataset = nome del CSV di input)
+  metriche_csv: "output/reconstruction_metrics.csv"
   neural_methods: "neural_methods"   # root dei repo neurali piu' recenti (SA-ConvONet, ...)
 
 preprocessing:
-  escludi_classi: [2]                # valori di 'classification' da escludere; [] per non escludere nulla
+  escludi_classi: []                # valori di 'classification' da escludere; [] per non escludere nulla
   altitude_min: null                 # tieni solo punti con altitude >= questo valore (null = nessun limite)
   altitude_max: null                 # tieni solo punti con altitude <= questo valore (null = nessun limite)
   escludi_zona_x: null               # [min, max] per escludere una zona rettangolare X (es. sosta barca)
@@ -28,7 +27,7 @@ visualizza: false                    # apre una finestra 3D col risultato a fine
 
 poisson:
   profondita: 9                      # risoluzione octree Poisson (8-10 tipico)
-  rimuovi_bassa_densita: 0.02        # percentile di vertici a bassa densità da rimuovere
+  rimuovi_bassa_densita: 0.35        # percentile di vertici a bassa densità da rimuovere
   dimensione_min_componente: 100     # pulizia mesh: componenti connesse più piccole vengono rimosse
 
 point2mesh:

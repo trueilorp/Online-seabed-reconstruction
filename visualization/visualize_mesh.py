@@ -1,24 +1,9 @@
-"""
-Visualizzatore rapido di mesh (.ply, .obj, .stl, ...)
-=========================================================
-
-Uso:
-    Imposta PERCORSO_MESH qui sotto e lancia:
-    python visualizza_mesh.py
-
-Durante la visualizzazione, premi il tasto S per salvare uno screenshot
-della vista corrente (utile per fermarsi sull'angolazione che vuoi).
-
-Dipendenze:
-    pip install open3d
-"""
-
 import open3d as o3d
 
 # --- Imposta qui il file da aprire ---
-PERCORSO_MESH = "../output/mesh/mesh_sa_convonet.ply"
+PERCORSO_MESH = "output/mesh/Terrain_unity/mesh_ppsurf.ply"
 MOSTRA_WIREFRAME = False   # True per vedere anche gli spigoli dei triangoli sovrapposti
-CARTELLA_SCREENSHOT = "../output/screenshot_mesh"   # cartella dove salvare le immagini (creata se non esiste)
+CARTELLA_SCREENSHOT = "output/screenshot_mesh"   # cartella dove salvare le immagini (creata se non esiste)
 
 
 def visualizza(percorso: str, wireframe: bool = False):

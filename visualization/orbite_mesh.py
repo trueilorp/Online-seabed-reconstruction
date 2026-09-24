@@ -1,31 +1,10 @@
-"""
-Genera un video orbitale attorno a una mesh (per presentazioni)
-====================================================================
-
-La camera orbita sia orizzontalmente che verticalmente, un giro completo
-(360°) su entrambi gli assi contemporaneamente -- parte da un'angolazione
-leggermente dall'alto (utile per mostrare il fondale ricostruito in modo
-leggibile, non "di taglio") e torna alla stessa inclinazione iniziale a
-fine giro, dato che una rotazione di 360° è periodica.
-
-Uso:
-    Imposta i parametri qui sotto e lancia:
-    python orbit_render.py
-
-Dipendenze:
-    pip install open3d
-    ffmpeg installato e nel PATH (per comporre i frame in un .mp4)
-    -- su Windows: scarica da ffmpeg.org, aggiungi la cartella bin/ al PATH
-    -- su WSL/Ubuntu: sudo apt install ffmpeg
-"""
-
 import os
 import subprocess
 
 import open3d as o3d
 
 # --- Imposta qui i parametri ---
-PERCORSO_MESH = "output/mesh/mesh_poisson.ply"
+PERCORSO_MESH = "output/mesh/Terrain_unity/mesh_poisson.ply"
 CARTELLA_FRAME = "frame_orbita"
 VIDEO_OUTPUT = "orbita_poisson.mp4"
 N_FRAME = 240                 # più frame = orbita più fluida, ma più lento da generare
