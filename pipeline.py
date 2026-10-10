@@ -1,0 +1,183 @@
+"""
+Pipeline di ricostruzione 3D condivisa da main.py ed evaluate.py.
+
+Contiene il caricamento della config, il preprocessing comune (caricamento CSV,
+pulizia, normali) e gli esecutori dei singoli algoritmi, selezionabili tramite
+ESECUTORI[config["algorithm"]].
+"""
+
+import os
+import time
+
+import open3d as o3d
+import yaml
+
+from utils.mesh import (
+	carica_point_cloud,
+	pulisci_point_cloud,
+	stima_normali,
+)
+from scripts.poisson import (
+	ricostruisci_poisson,
+	pulisci_mesh,
+)
+from scripts.point2mesh import (
+	subsample_aggressivo,
+	ricostruisci_point2mesh,
+	stampa_curva_loss,
+)
+from scripts.ppsurf import (
+	sottocampiona_se_necessario,
+	ricostruisci_ppsurf,
+)
+from scripts.sa_convonet import ricostruisci_sa_convonet
+
+CONFIG_PATH = "config/config.yaml"
+
+
+def load_config(percorso: str = CONFIG_PATH) -> dict:
+	with open(percorso, "r") as file:
+		return yaml.safe_load(file)
+
+
+def carica_e_pulisci_point_cloud(config: dict) -> o3d.geometry.PointCloud:
+	"""Caricamento + pulizia: comune a tutti gli algoritmi."""
+	paths = config["paths"]
+	pre = config["preprocessing"]
+	escludi_zona_x = tuple(pre["escludi_zona_x"]) if pre["escludi_zona_x"] else None
+	escludi_zona_z = tuple(pre["escludi_zona_z"]) if pre["escludi_zona_z"] else None
+
+	pcd = carica_point_cloud(
+		paths["input_csv"],
+		classi_da_escludere=pre["escludi_classi"],
+		altitude_min=pre["altitude_min"],
+		altitude_max=pre["altitude_max"],
+		escludi_zona_x=escludi_zona_x,
+		escludi_zona_z=escludi_zona_z,
+	)
+	pcd = pulisci_point_cloud(
+		pcd,
+		voxel_size=pre["voxel_size"],
+		nb_neighbors=pre["nb_neighbors"],
+		std_ratio=pre["std_ratio"],
+	)
+	return pcd
+
+
+def stima_normali_da_config(pcd: o3d.geometry.PointCloud, config: dict) -> o3d.geometry.PointCloud:
+	pre = config["preprocessing"]
+	return stima_normali(
+		pcd,
+		raggio_ricerca=pre["raggio_ricerca_normali"],
+		max_vicini=pre["max_vicini_normali"],
+	)
+
+
+def esegui_poisson(pcd: o3d.geometry.PointCloud, config: dict):
+	p = config["poisson"]
+	pcd = stima_normali_da_config(pcd, config)
+
+	inizio = time.time()
+	mesh = ricostruisci_poisson(pcd, profondita=p["profondita"],
+								 rimuovi_bassa_densita=p["rimuovi_bassa_densita"])
+	tempo_calcolo = time.time() - inizio
+
+	mesh = pulisci_mesh(mesh, dimensione_min_componente=p["dimensione_min_componente"])
+	mesh.compute_vertex_normals()
+	return mesh, pcd, tempo_calcolo, "poisson"
+
+
+def esegui_point2mesh(pcd: o3d.geometry.PointCloud, config: dict):
+	p2m = config["point2mesh"]
+	paths = config["paths"]
+
+	pcd = subsample_aggressivo(pcd, p2m["max_punti"])
+	pcd = stima_normali_da_config(pcd, config)
+
+	nome_run = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
+	point2mesh_dir = os.path.join(paths["neural_methods"], "point2mesh")
+	manifold_dir = os.path.join(paths["neural_methods"], "Manifold", "build")
+
+	mesh, tempo_calcolo, loss_per_iterazione = ricostruisci_point2mesh(
+		pcd, nome_run,
+		point2mesh_dir=point2mesh_dir, manifold_dir=manifold_dir,
+		conda_env=p2m["conda_env"], work_dir=p2m["work_dir"],
+		iterations=p2m["iterations"],
+		num_facce_mesh_iniziale=p2m["initial_mesh_faces"],
+		manifold_res=p2m["manifold_res"],
+		export_interval=p2m["export_interval"],
+	)
+	stampa_curva_loss(loss_per_iterazione)
+	return mesh, pcd, tempo_calcolo, "point2mesh"
+
+
+def esegui_ppsurf(pcd: o3d.geometry.PointCloud, config: dict):
+	pps = config["ppsurf"]
+	paths = config["paths"]
+
+	pcd = sottocampiona_se_necessario(pcd, pps["max_punti"])
+	pcd = stima_normali_da_config(pcd, config)  # non usato da PPSurf, mantenuto per coerenza col preprocessing
+
+	nome_run = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
+	ppsurf_dir = os.path.join(paths["neural_methods"], "ppsurf")
+
+	mesh, tempo_calcolo = ricostruisci_ppsurf(
+		pcd, nome_run,
+		ppsurf_dir=ppsurf_dir, conda_env=pps["conda_env"], work_dir=pps["work_dir"],
+		gen_resolution_global=pps["gen_resolution_global"],
+		rec_batch_size=pps["rec_batch_size"],
+	)
+	return mesh, pcd, tempo_calcolo, "ppsurf"
+
+
+def esegui_sa_convonet(pcd: o3d.geometry.PointCloud, config: dict):
+	sac = config["sa_convonet"]
+	paths = config["paths"]
+
+	pcd = stima_normali_da_config(pcd, config)
+
+	nome_run = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
+	sa_convonet_dir = os.path.join(paths["neural_methods"], "SA-ConvONet")
+
+	mesh, tempo_calcolo = ricostruisci_sa_convonet(
+		pcd, nome_run,
+		sa_convonet_dir=sa_convonet_dir, conda_env=sac["conda_env"], work_dir=sac["work_dir"],
+		config_file=sac["config_file"],
+		unit_size=sac["unit_size"], query_vol_size=sac["query_vol_size"],
+	)
+	return mesh, pcd, tempo_calcolo, "sa_convonet"
+
+
+# chiavi di config che non sono parametri della ricostruzione (percorsi, ambienti, logging)
+CHIAVI_NON_PARAMETRI = {"conda_env", "work_dir", "export_interval", "config_file"}
+
+
+def raccogli_parametri(config: dict) -> dict:
+	"""Parametri della run da salvare nel CSV: preprocessing, valutazione e sezione del metodo usato."""
+	def formatta(valore):
+		if valore is None:
+			return "nessuno"  # "null" in config (nessun limite/filtro); non "null", che pandas rilegge come cella vuota
+		if isinstance(valore, (list, tuple)):
+			return str(list(valore))
+		return valore
+
+	algorithm = config["algorithm"]
+	parametri = {}
+	for chiave, valore in config["preprocessing"].items():
+		# voxel_size ed escludi_classi hanno gia' colonne dedicate (presenti anche nelle righe vecchie)
+		if chiave not in ("voxel_size", "escludi_classi"):
+			parametri[f"pre_{chiave}"] = formatta(valore)
+	for chiave, valore in config["valutazione"].items():
+		parametri[f"val_{chiave}"] = formatta(valore)
+	for chiave, valore in config.get(algorithm, {}).items():
+		if chiave not in CHIAVI_NON_PARAMETRI:
+			parametri[f"{algorithm}_{chiave}"] = formatta(valore)
+	return parametri
+
+
+ESECUTORI = {
+	"poisson": esegui_poisson,
+	"point2mesh": esegui_point2mesh,
+	"ppsurf": esegui_ppsurf,
+	"sa_convonet": esegui_sa_convonet,
+}
