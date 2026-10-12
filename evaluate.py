@@ -2,7 +2,7 @@
 Valutazione dei metodi di ricostruzione sui terreni sintetici.
 
 Per ogni terreno in data/synthetic/<split>/<id>/ ricostruisce la mesh da
-<id>_scan.csv con la stessa pipeline di main.py (pipeline.py) e la confronta con
+<id>_scan.csv con la stessa pipeline di reconstruct_single_dataset.py (utils/pipeline.py) e la confronta con
 <id>_ground_truth.obj:
   - accuratezza : distanza dei punti campionati sulla mesh ricostruita dalla GT
   - completezza : distanza dei punti campionati sul fondale GT dalla mesh ricostruita
@@ -10,15 +10,18 @@ Per ogni terreno in data/synthetic/<split>/<id>/ ricostruisce la mesh da
 La GT e' chiusa (pareti e fondo): completezza e copertura usano solo il fondale
 (top_surface), altrimenti pareti e fondo, mai visti dal sonar, peserebbero come mancanti.
 
-Output in output/evaluation/<split>/:
-  meshes/<id>_<metodo>.ply, metriche_per_terreno.csv, metriche_per_famiglia.csv
+Percorsi e default (split, limit, metodi, n_campioni, tau) nella sezione "evaluation"
+di config/config.yaml; split, limit, metodi e tau sovrascrivibili da riga di comando.
+
+Output in <evaluation.output_dir>/<split>/:
+  meshes/<id>_<metodo>[_sw].ply, metriche_per_terreno.csv, metriche_per_famiglia.csv
+Con sliding_window.abilitato in config la ricostruzione avviene a finestre di ping (suffisso _sw).
 
 Uso:
 	python evaluate.py --split val --limit 2 --methods poisson ppsurf
 """
 
 import argparse
-import copy
 import os
 import traceback
 
@@ -26,25 +29,8 @@ import numpy as np
 import open3d as o3d
 import pandas as pd
 
-from pipeline import load_config, carica_e_pulisci_point_cloud, ESECUTORI
-
-SYNTHETIC_DIR = "data/synthetic"
-OUTPUT_DIR = "output/evaluation"
-METODI = ["poisson"]
-N_CAMPIONI = 100_000  # punti campionati su ciascuna superficie per le distanze
-TAU = 0.5             # soglia di copertura, m (pari al voxel_size del preprocessing)
-
-
-def top_surface(gt_mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
-	"""Solo il fondale della GT chiusa: scarta pareti e fondo, cioe' le facce che toccano la quota della base."""
-	vertici = np.asarray(gt_mesh.vertices)
-	triangoli = np.asarray(gt_mesh.triangles)
-	alla_base = np.isclose(vertici[:, 1], vertici[:, 1].min(), atol=1e-4)
-	tieni = ~alla_base[triangoli].any(axis=1)
-	fondale = o3d.geometry.TriangleMesh(gt_mesh)
-	fondale.remove_triangles_by_mask(~tieni)
-	fondale.remove_unreferenced_vertices()
-	return fondale
+from utils.mesh import top_surface
+from utils.pipeline import load_config, config_per_terreno, ricostruisci, ESECUTORI
 
 
 def distanze_da_mesh(punti: np.ndarray, mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
@@ -55,9 +41,9 @@ def distanze_da_mesh(punti: np.ndarray, mesh: o3d.geometry.TriangleMesh) -> np.n
 
 
 def calcola_metriche(mesh: o3d.geometry.TriangleMesh, gt_mesh: o3d.geometry.TriangleMesh,
-					 fondale: o3d.geometry.TriangleMesh, tau: float) -> dict:
-	punti_mesh = np.asarray(mesh.sample_points_uniformly(N_CAMPIONI).points)
-	punti_fondale = np.asarray(fondale.sample_points_uniformly(N_CAMPIONI).points)
+					 fondale: o3d.geometry.TriangleMesh, tau: float, n_campioni: int) -> dict:
+	punti_mesh = np.asarray(mesh.sample_points_uniformly(n_campioni).points)
+	punti_fondale = np.asarray(fondale.sample_points_uniformly(n_campioni).points)
 
 	acc = distanze_da_mesh(punti_mesh, gt_mesh)
 	comp = distanze_da_mesh(punti_fondale, mesh)
@@ -70,28 +56,14 @@ def calcola_metriche(mesh: o3d.geometry.TriangleMesh, gt_mesh: o3d.geometry.Tria
 	}
 
 
-def config_per_terreno(percorso_scan: str, metodo: str) -> dict:
-	config = copy.deepcopy(load_config())
-	config["paths"]["input_csv"] = percorso_scan
-	config["algorithm"] = metodo
-	# i filtri del config sono pensati per i dati reali: sui sintetici non servono
-	pre = config["preprocessing"]
-	pre["escludi_classi"] = []
-	pre["altitude_min"] = None
-	pre["altitude_max"] = None
-	pre["escludi_zona_x"] = None
-	pre["escludi_zona_z"] = None
-	return config
-
-
-def elenca_terreni(split: str, limit: int = None) -> list:
-	cartella = os.path.join(SYNTHETIC_DIR, split)
+def elenca_terreni(synthetic_dir: str, split: str, limit: int = None) -> list:
+	cartella = os.path.join(synthetic_dir, split)
 	ids = sorted(d for d in os.listdir(cartella) if os.path.isdir(os.path.join(cartella, d)))
 	return ids[:limit] if limit else ids
 
 
-def famiglie_da_manifest() -> dict:
-	manifest = os.path.join(SYNTHETIC_DIR, "manifest.csv")
+def famiglie_da_manifest(synthetic_dir: str) -> dict:
+	manifest = os.path.join(synthetic_dir, "manifest.csv")
 	if not os.path.exists(manifest):
 		return {}
 	df = pd.read_csv(manifest)
@@ -107,30 +79,36 @@ def salva_csv(righe: list, cartella_out: str):
 		return
 	colonne = ["accuratezza_media", "accuratezza_p90", "completezza_media", "completezza_p90",
 			   "copertura", "n_vertici", "tempo_calcolo_secondi"]
-	per_famiglia = ok.groupby(["famiglia", "metodo"])[colonne].mean()
-	per_famiglia.insert(0, "n_terreni", ok.groupby(["famiglia", "metodo"]).size())
+	gruppi = ["famiglia", "metodo", "sliding_window"]
+	per_famiglia = ok.groupby(gruppi)[colonne].mean()
+	per_famiglia.insert(0, "n_terreni", ok.groupby(gruppi).size())
 	per_famiglia.reset_index().to_csv(os.path.join(cartella_out, "metriche_per_famiglia.csv"), index=False)
 
 
 def main():
+	config_base = load_config()
+	ev = config_base["evaluation"]
+
 	parser = argparse.ArgumentParser(description="Valuta i metodi di ricostruzione sui terreni sintetici.")
-	parser.add_argument("--split", default="val", choices=["train", "val", "test"])
-	parser.add_argument("--limit", type=int, default=None, help="numero massimo di terreni")
-	parser.add_argument("--methods", nargs="+", default=METODI, choices=list(ESECUTORI))
-	parser.add_argument("--tau", type=float, default=TAU, help="soglia di copertura in metri")
+	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test"])
+	parser.add_argument("--limit", type=int, default=ev["limit"], help="numero massimo di terreni")
+	parser.add_argument("--methods", nargs="+", default=ev["metodi"], choices=list(ESECUTORI))
+	parser.add_argument("--tau", type=float, default=ev["tau"], help="soglia di copertura in metri")
 	args = parser.parse_args()
 
-	cartella_out = os.path.join(OUTPUT_DIR, args.split)
+	sliding_window = bool(config_base.get("sliding_window", {}).get("abilitato"))
+	suffisso = "_sw" if sliding_window else ""
+	cartella_out = os.path.join(ev["output_dir"], args.split)
 	cartella_mesh = os.path.join(cartella_out, "meshes")
 	os.makedirs(cartella_mesh, exist_ok=True)
 
-	famiglie = famiglie_da_manifest()
-	terreni = elenca_terreni(args.split, args.limit)
+	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
+	terreni = elenca_terreni(ev["synthetic_dir"], args.split, args.limit)
 	righe = []
 
 	# in sequenza: i metodi neurali condividono la work_dir
 	for i, id_terreno in enumerate(terreni, 1):
-		cartella = os.path.join(SYNTHETIC_DIR, args.split, id_terreno)
+		cartella = os.path.join(ev["synthetic_dir"], args.split, id_terreno)
 		percorso_scan = os.path.join(cartella, f"{id_terreno}_scan.csv")
 		percorso_gt = os.path.join(cartella, f"{id_terreno}_ground_truth.obj")
 		famiglia = famiglie.get(id_terreno, id_terreno.rsplit("_", 1)[0])
@@ -140,16 +118,15 @@ def main():
 
 		for metodo in args.methods:
 			print(f"\n=== [{i}/{len(terreni)}] {id_terreno} - {metodo} ===")
-			riga = {"id": id_terreno, "famiglia": famiglia, "metodo": metodo}
+			riga = {"id": id_terreno, "famiglia": famiglia, "metodo": metodo, "sliding_window": sliding_window}
 			try:
-				config = config_per_terreno(percorso_scan, metodo)
-				pcd = carica_e_pulisci_point_cloud(config)
-				mesh, _, tempo, nome = ESECUTORI[metodo](pcd, config)
+				config = config_per_terreno(config_base, percorso_scan, metodo)
+				mesh, _, tempo, nome = ricostruisci(config)
 
-				mesh_out = os.path.join(cartella_mesh, f"{id_terreno}_{nome}.ply")
+				mesh_out = os.path.join(cartella_mesh, f"{id_terreno}_{nome}{suffisso}.ply")
 				o3d.io.write_triangle_mesh(mesh_out, mesh)
 
-				riga.update(calcola_metriche(mesh, gt_mesh, fondale, args.tau))
+				riga.update(calcola_metriche(mesh, gt_mesh, fondale, args.tau, ev["n_campioni"]))
 				riga.update({"n_vertici": len(mesh.vertices), "tempo_calcolo_secondi": tempo,
 							 "mesh": mesh_out, "errore": None})
 				print("  " + ", ".join(f"{k}={v:.4f}" for k, v in riga.items() if isinstance(v, float)))

@@ -1,7 +1,7 @@
 import open3d as o3d
 
 # --- Imposta qui il file da aprire ---
-PERCORSO_MESH = "output/mesh/Terrain_unity/mesh_ppsurf.ply"
+PERCORSO_MESH = "output/evaluation/val/meshes/flat_sand_012_poisson.ply" # "output/mesh/Terrain_unity/mesh_ppsurf.ply"
 MOSTRA_WIREFRAME = False   # True per vedere anche gli spigoli dei triangoli sovrapposti
 CARTELLA_SCREENSHOT = "output/screenshot_mesh"   # cartella dove salvare le immagini (creata se non esiste)
 

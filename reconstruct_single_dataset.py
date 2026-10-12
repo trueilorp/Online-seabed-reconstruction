@@ -8,7 +8,7 @@ sono condivisi da tutti gli algoritmi; ogni algoritmo usa solo la propria
 sezione di config per i parametri specifici.
 
 Uso:
-	python main.py
+	python reconstruct_single_dataset.py
 """
 
 import os
@@ -21,29 +21,28 @@ from utils.mesh import (
 	salva_metriche_csv,
 	confronta_con_ground_truth,
 )
-from pipeline import (
+from utils.pipeline import (
 	load_config,
-	carica_e_pulisci_point_cloud,
+	ricostruisci,
 	raccogli_parametri,
-	ESECUTORI,
 )
 
 
 def main():
 	config = load_config()
-	algorithm = config["algorithm"]
 
-	point_cloud_data = carica_e_pulisci_point_cloud(config)
-	mesh, point_cloud_data, tempo_calcolo, nome_metodo = ESECUTORI[algorithm](point_cloud_data, config)
+	# con sliding_window abilitato point_cloud_data e' il campione tenuto dalle finestre
+	mesh, point_cloud_data, tempo_calcolo, nome_metodo = ricostruisci(config)
 
 	paths = config["paths"]
 	pre = config["preprocessing"]
 	valutazione = config["valutazione"]
+	suffisso = "_sw" if config.get("sliding_window", {}).get("abilitato") else ""
 
 	nome_dataset = os.path.splitext(os.path.basename(paths["input_csv"]))[0]
 	cartella_output = os.path.join(paths["output_mesh_dir"], nome_dataset)
 	os.makedirs(cartella_output, exist_ok=True)
-	percorso_output = os.path.join(cartella_output, f"mesh_{nome_metodo}.ply")
+	percorso_output = os.path.join(cartella_output, f"mesh_{nome_metodo}{suffisso}.ply")
 	o3d.io.write_triangle_mesh(percorso_output, mesh)
 	print(f"\nMesh salvata in: {percorso_output}")
 

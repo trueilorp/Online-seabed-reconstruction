@@ -26,6 +26,18 @@ def carica_point_cloud(percorso_csv: str, classi_da_escludere: list = None,
 						altitude_min: float = None, altitude_max: float = None,
 						escludi_zona_x: tuple = None, escludi_zona_z: tuple = None) -> o3d.geometry.PointCloud:
 	df = pd.read_csv(percorso_csv)
+	colonne = colonne_point_cloud(df)
+	df = filtra_dataframe(df, colonne, classi_da_escludere=classi_da_escludere,
+						  altitude_min=altitude_min, altitude_max=altitude_max,
+						  escludi_zona_x=escludi_zona_x, escludi_zona_z=escludi_zona_z)
+	pcd = dataframe_a_point_cloud(df, colonne)
+	print(f"[1/5] Caricati {len(pcd.points)} punti da {percorso_csv} "
+		  f"(X={colonne['x']}, Y={colonne['y']}, Z={colonne['z']})")
+	return pcd
+
+
+def colonne_point_cloud(df: pd.DataFrame) -> dict:
+	"""Nomi delle colonne x/y/z, intensita' e classification nei vari formati CSV (Unity, Omniscan, Surveyor)."""
 	colonne_lower = {c.lower(): c for c in df.columns}
 
 	col_x = colonne_lower.get("x") or colonne_lower.get("easting (local m)")
@@ -42,6 +54,16 @@ def carica_point_cloud(percorso_csv: str, classi_da_escludere: list = None,
 		raise ValueError(
 			f"Non trovo colonne x,y,z (o easting/northing/altitude). Colonne nel CSV: {list(df.columns)}"
 		)
+	return {"x": col_x, "y": col_y, "z": col_z,
+			"intensity": col_intensity, "classification": col_classification}
+
+
+def filtra_dataframe(df: pd.DataFrame, colonne: dict, classi_da_escludere: list = None,
+					 altitude_min: float = None, altitude_max: float = None,
+					 escludi_zona_x: tuple = None, escludi_zona_z: tuple = None) -> pd.DataFrame:
+	"""Filtri sui dati grezzi (classi, range di altitudine, zona rettangolare esclusa)."""
+	col_x, col_y, col_z = colonne["x"], colonne["y"], colonne["z"]
+	col_classification = colonne["classification"]
 
 	if classi_da_escludere and col_classification:
 		n_prima = len(df)
@@ -67,8 +89,13 @@ def carica_point_cloud(percorso_csv: str, classi_da_escludere: list = None,
 		df = df[~dentro_zona]
 		print(f"[1/5] Escluse {n_prima - len(df)} righe nella zona X{escludi_zona_x} x Z{escludi_zona_z} "
 			  f"(es. sosta barca) -> {len(df)} righe rimaste")
+	return df
 
-	punti = df[[col_x, col_y, col_z]].to_numpy(dtype=np.float64)
+
+def dataframe_a_point_cloud(df: pd.DataFrame, colonne: dict) -> o3d.geometry.PointCloud:
+	"""Point cloud Open3D dalle colonne x/y/z, colorata per intensita' (o per altezza se assente)."""
+	col_intensity = colonne["intensity"]
+	punti = df[[colonne["x"], colonne["y"], colonne["z"]]].to_numpy(dtype=np.float64)
 
 	pcd = o3d.geometry.PointCloud()
 	pcd.points = o3d.utility.Vector3dVector(punti)
@@ -89,8 +116,6 @@ def carica_point_cloud(percorso_csv: str, classi_da_escludere: list = None,
 		colori = np.stack([altezze_norm, altezze_norm, 1 - altezze_norm], axis=1)
 		pcd.colors = o3d.utility.Vector3dVector(colori)
 		print(f"  Colonna intensità non trovata: colorazione mesh basata sull'altezza (Y) come fallback")
-
-	print(f"[1/5] Caricati {len(pcd.points)} punti da {percorso_csv} (X={col_x}, Y={col_y}, Z={col_z})")
 	return pcd
 
 
@@ -120,6 +145,18 @@ def stima_normali(pcd: o3d.geometry.PointCloud, raggio_ricerca: float = 0.1,
 	pcd.orient_normals_to_align_with_direction(orientation_reference=np.array([0.0, 1.0, 0.0]))
 	print("[3/5] Normali stimate e orientate")
 	return pcd
+
+
+def top_surface(gt_mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
+	"""Solo il fondale di una GT chiusa (terreni sintetici): scarta pareti e fondo, cioe' le facce che toccano la quota della base."""
+	vertici = np.asarray(gt_mesh.vertices)
+	triangoli = np.asarray(gt_mesh.triangles)
+	alla_base = np.isclose(vertici[:, 1], vertici[:, 1].min(), atol=1e-4)
+	tieni = ~alla_base[triangoli].any(axis=1)
+	fondale = o3d.geometry.TriangleMesh(gt_mesh)
+	fondale.remove_triangles_by_mask(~tieni)
+	fondale.remove_unreferenced_vertices()
+	return fondale
 
 
 # ---------------------------------------------------------------------------

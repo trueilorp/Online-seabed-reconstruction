@@ -3,7 +3,7 @@ algorithm: "ppsurf"  # "poisson", "point2mesh", "ppsurf", "sa_convonet"
 paths:
   input_csv: "data/sonar/Terrain_unity.csv"
   ground_truth_mesh: "data/sonar/Terrain_ground_truth.obj"            # opzionale: mesh .obj/.ply di riferimento per il confronto
-  output_mesh_dir: "output/mesh"     # il file viene salvato come <dataset>/mesh_<algoritmo>.ply (dataset = nome del CSV di input)
+  output_mesh_dir: "output/mesh"     # il file viene salvato come <dataset>/mesh_<algoritmo>[_sw].ply (dataset = nome del CSV di input, _sw = sliding window)
   metriche_csv: "output/reconstruction_metrics.csv"
   neural_methods: "neural_methods"   # root dei repo neurali piu' recenti (SA-ConvONet, ...)
 
@@ -25,6 +25,17 @@ valutazione:
 
 visualizza: false                    # apre una finestra 3D col risultato a fine esecuzione
 
+# Ricostruzione a finestre di ping (vale per reconstruct_single_dataset.py ed evaluate.py).
+# Il CSV viene letto a blocchi come se arrivasse dal sonar; ogni finestra viene ricostruita
+# con "algorithm" e poi scartata; le mesh delle finestre, ritagliate sulla propria zona, vengono unite.
+sliding_window:
+  abilitato: false                   # false = ricostruzione sull'intera point cloud (comportamento classico)
+  ping_per_finestra: 300             # ping per finestra (sintetici: ~190 punti/ping, 300 ping ~ 50 m di rotta)
+  ping_sovrapposizione: 60           # ping in comune tra finestre consecutive (divisi a meta' nel ritaglio)
+  righe_per_blocco: 20000            # righe lette dal CSV per volta (simula l'arrivo dei dati)
+  punti_campione_per_finestra: 5000  # punti tenuti per finestra solo per le metriche di fedelta' finali
+
+# METHODS
 poisson:
   profondita: 9                      # risoluzione octree Poisson (8-10 tipico)
   rimuovi_bassa_densita: 0.35        # percentile di vertici a bassa densità da rimuovere
@@ -59,3 +70,14 @@ sa_convonet:
   # da affinare una volta verificato che la catena funzioni end-to-end.
   unit_size: 0.005
   query_vol_size: 25
+##############################
+
+# usata solo da evaluate.py (benchmark sui terreni sintetici); split, limit, metodi e tau sovrascrivibili da CLI
+evaluation:
+  synthetic_dir: "data/synthetic"    # contiene <split>/<id>/{<id>_scan.csv, <id>_ground_truth.obj} e manifest.csv
+  output_dir: "output/evaluation"    # risultati in <output_dir>/<split>/ (mesh + CSV per terreno e per famiglia)
+  split: "val"                       # "val" o "test"
+  limit: 3                        # numero massimo di terreni (in ordine alfabetico); null = tutti quelli dello split
+  metodi: ["poisson", "ppsurf", "sa_convonet"]                # chiavi di ESECUTORI in pipeline.py, eseguite in sequenza
+  n_campioni: 100000                 # punti campionati su ciascuna superficie per accuratezza/completezza
+  tau: 0.5                           # soglia di copertura, m (pari al voxel_size del preprocessing)

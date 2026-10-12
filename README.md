@@ -8,14 +8,16 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 
 ```
 .
-├── main.py                              # entry point: legge config/config.yaml e lancia la pipeline scelta
+├── reconstruct_single_dataset.py        # entry point: ricostruisce il dataset in config/config.yaml con l'algoritmo scelto
+├── evaluate.py                          # benchmark dei metodi sui terreni sintetici vs ground truth (sezione evaluation del config)
 ├── config/
 │   └── config.yaml                      # percorsi + parametri condivisi e specifici per algoritmo
 ├── data/
 │   ├── data_analisys.py                 # analisi esplorativa di un CSV point cloud
 │   └── sonar/                           # CSV point cloud reali (Omniscan 3D, Surveyor 240) e sintetici (Unity)
 ├── utils/
-│   └── mesh.py                          # funzioni condivise: caricamento/pulizia point cloud, normali, metriche
+│   ├── mesh.py                          # funzioni condivise: caricamento/pulizia point cloud, normali, metriche
+│   └── pipeline.py                      # pipeline condivisa: config, caricamento/pulizia, esecutori degli algoritmi
 ├── scripts/
 │   ├── poisson.py                       # ricostruzione classica: Poisson Surface Reconstruction (Open3D)
 │   ├── point2mesh.py                    # ricostruzione neurale: Point2Mesh (self-prior, sottoprocesso)
