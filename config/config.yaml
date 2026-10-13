@@ -70,14 +70,22 @@ sa_convonet:
   # da affinare una volta verificato che la catena funzioni end-to-end.
   unit_size: 0.005
   query_vol_size: 25
+  # Adattamento online "SA" (sign-agnostic, per-scena): la rete viene riottimizzata sulla
+  # point cloud di ogni scena prima di estrarre la mesh (generate_optim_largescene.py).
+  # Molto piu' lento: online_iterazioni passi + una mesh completa ogni online_passo_lr passi.
+  # Nei CSV il metodo compare come "sa_convonet_online".
+  ottimizzazione_online: false
+  online_iterazioni: 2000            # test_optim.n_iter (default SA-ConvONet: 2000, consigliato >= 720)
+  online_passo_lr: 800               # ogni quanti passi lr *= 0.3 (e mesh intermedia); consigliato >= 300
+  online_batch_size: 1               # crop per passo (default 3, articolo 3-8): piu' alto = piu' VRAM
 ##############################
 
 # usata solo da evaluate.py (benchmark sui terreni sintetici); split, limit, metodi e tau sovrascrivibili da CLI
 evaluation:
   synthetic_dir: "data/synthetic"    # contiene <split>/<id>/{<id>_scan.csv, <id>_ground_truth.obj} e manifest.csv
   output_dir: "output/evaluation"    # risultati in <output_dir>/<split>/ (mesh + CSV per terreno e per famiglia)
-  split: "val"                       # "val" o "test"
-  limit: 3                        # numero massimo di terreni (in ordine alfabetico); null = tutti quelli dello split
-  metodi: ["poisson", "ppsurf", "sa_convonet"]                # chiavi di ESECUTORI in pipeline.py, eseguite in sequenza
+  split: "test"                       # "val" o "test"
+  limit: 1                        # numero massimo di terreni (in ordine alfabetico); null = tutti quelli dello split
+  metodi: ["sa_convonet"]                # chiavi di ESECUTORI in pipeline.py, eseguite in sequenza
   n_campioni: 100000                 # punti campionati su ciascuna superficie per accuratezza/completezza
   tau: 0.5                           # soglia di copertura, m (pari al voxel_size del preprocessing)

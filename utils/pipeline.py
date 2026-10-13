@@ -177,8 +177,14 @@ def esegui_sa_convonet(pcd: o3d.geometry.PointCloud, config: dict):
 		sa_convonet_dir=sa_convonet_dir, conda_env=sac["conda_env"], work_dir=sac["work_dir"],
 		config_file=sac["config_file"],
 		unit_size=sac["unit_size"], query_vol_size=sac["query_vol_size"],
+		ottimizzazione_online=sac.get("ottimizzazione_online", False),
+		online_iterazioni=sac.get("online_iterazioni", 2000),
+		online_passo_lr=sac.get("online_passo_lr", 800),
+		online_batch_size=sac.get("online_batch_size", 3),
 	)
-	return mesh, pcd, tempo_calcolo, "sa_convonet"
+	# nome distinto: mesh e righe dei CSV non si confondono con quelle senza adattamento
+	nome = "sa_convonet_online" if sac.get("ottimizzazione_online") else "sa_convonet"
+	return mesh, pcd, tempo_calcolo, nome
 
 
 # chiavi di config che non sono parametri della ricostruzione (percorsi, ambienti, logging)

@@ -14,10 +14,14 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 │   └── config.yaml                      # percorsi + parametri condivisi e specifici per algoritmo
 ├── data/
 │   ├── data_analisys.py                 # analisi esplorativa di un CSV point cloud
-│   └── sonar/                           # CSV point cloud reali (Omniscan 3D, Surveyor 240) e sintetici (Unity)
+│   ├── sonar/                           # CSV point cloud reali (Omniscan 3D, Surveyor 240) e sintetici (Unity)
+│   └── synthetic/                       # terreni sintetici train/val/test: <id>_scan.csv + <id>_ground_truth.obj
 ├── utils/
 │   ├── mesh.py                          # funzioni condivise: caricamento/pulizia point cloud, normali, metriche
-│   └── pipeline.py                      # pipeline condivisa: config, caricamento/pulizia, esecutori degli algoritmi
+│   ├── pipeline.py                      # pipeline condivisa: config, caricamento/pulizia, esecutori, sliding window
+│   ├── generate_seabed_heightmaps.py    # genera i fondali sintetici (heightmap + tubi/piloni)
+│   ├── simulate_multibeam_scans.py      # simula le scansioni multibeam e le ground truth chiuse
+│   └── make_saconvonet_dataset.py       # terreni sintetici -> dataset di fine-tuning SA-ConvONet
 ├── scripts/
 │   ├── poisson.py                       # ricostruzione classica: Poisson Surface Reconstruction (Open3D)
 │   ├── point2mesh.py                    # ricostruzione neurale: Point2Mesh (self-prior, sottoprocesso)
@@ -208,20 +212,83 @@ Curva a campana, testata su `Terrain_unity.csv`:
 Su dati sonar reali (`OS3D_Max_Range_Test.csv`), SA-ConvONet **non
 replica** il vantaggio visto su Unity (fedeltà 1.76 m, peggiore di Poisson
 e comparabile a PPSurf) — il gap di dominio non si risolve con la sola
-finestratura/ottimizzazione test-time, rafforza la necessità di un vero
-fine-tuning.
+finestratura, rafforza la necessità di un vero fine-tuning. (Questi risultati
+sono senza ottimizzazione test-time: la pipeline usava `generate.py`, cioè
+ConvONet pre-addestrato. L'ottimizzazione è stata provata dopo, vedi sotto.)
+
+### SA-ConvONet con ottimizzazione online (test-time): scartata, infattibile
+
+La "SA" di SA-ConvONet è l'ottimizzazione *sign-agnostic* a test-time: prima
+di estrarre la mesh, la rete viene riottimizzata sulla point cloud della
+singola scena (`generate_optim_largescene.py`, senza ground truth). È
+integrata come opzione, **disattivata di default**:
+`sa_convonet.ottimizzazione_online: true` in `config/config.yaml` (nei CSV il
+metodo compare come `sa_convonet_online`). Due accorgimenti nel wrapper
+(`scripts/sa_convonet.py`): una sola soglia di estrazione (lo script genera
+una mesh completa per soglia a ogni decadimento del learning rate) e il
+checkpoint passato come file locale della cache di torch (con un URL lo
+script originale va in errore).
+
+**Perché è infattibile per il nostro obiettivo** (ricostruzione in pochi
+secondi, finestra per finestra):
+
+- **Memoria**: con i parametri degli autori (`batch_size: 3` crop per passo)
+  va in *CUDA out of memory* sui 4 GB della GTX 1650 — a differenza
+  dell'inferenza, qui si allena l'encoder (UNet3D su crop di ~88³ voxel).
+  Entra solo con `batch_size: 1`, a ~3.9 GB su 4.
+- **Tempo**: ~2.35 s per passo (GTX 1650, batch 1). Con i default della repo
+  (2000 passi) sono ~78 min di ottimizzazione + 4 generazioni complete,
+  **~1.5 h per terreno**. Anche fermandosi a ~600 passi, dove il paper
+  (appendice B) indica che i risultati si stabilizzano, servono ~25 min. Il
+  paper non riporta tempi assoluti, ma indica esplicitamente la lentezza
+  dell'inferenza come limite del metodo (sez. 8).
+- **Budget reale**: con lo sliding window (300 ping, sovrapposizione 60,
+  6 ping/s) arriva una finestra nuova ogni ~40 s. L'ottimizzazione online è
+  fuori budget di circa due ordini di grandezza.
+
+**Risultato della prova** (`flat_sand_015`, split test, solo 100 passi di
+ottimizzazione, ~375 s), confrontato con le altre mesh dello stesso terreno.
+"Superfici per raggio" conta quante volte un raggio verticale attraversa la
+mesh (griglia 60×60): un fondale corretto ne ha una sola.
+
+| Metodo | Accuratezza | Completezza | Copertura | Superfici per raggio | Spessore tra le due superfici |
+|---|---|---|---|---|---|
+| Poisson | **0.22 m** | 0.61 m | 77% | 0: 57%, 1: 37%, 2: 5% | — |
+| PPSurf | 0.75 m | 0.31 m | **97%** | 2: 98% | 1.05 m |
+| SA-ConvONet | 0.29 m | 0.56 m | 60% | 0: 60%, 2: 40% | 0.56 m |
+| SA-ConvONet online | 0.50 m | **0.30 m** | 87% | 2: 98% | 1.22 m |
+
+L'ottimizzazione online aumenta copertura e completezza, ma peggiora
+l'accuratezza perché la mesh diventa un **guscio doppio** spesso ~1.2 m
+attorno ai punti (strato alto ~0.3 m sopra il fondale vero, strato basso
+~0.8 m sotto): la loss sign-agnostic non distingue sopra da sotto, quindi
+mette superficie su entrambi i lati. Lo stesso guscio doppio si vede in
+PPSurf (98% dei raggi, ~1 m): la sua copertura alta va letta con questo in
+mente. Le metriche attuali (distanze medie) non penalizzano esplicitamente
+una superficie doppia — da tenere presente nei confronti.
+
+**Decisione**: niente adattamento online. L'adattamento al dominio sonar va
+fatto *offline*, con il fine-tuning supervisionato sui terreni sintetici;
+in ricostruzione resta un solo passaggio in avanti della rete
+(`generate.py`), da confrontare con Poisson sullo stesso budget per finestra.
 
 ## Prossimi passi
 
-**Fine-tuning (Passo 2 di Daniele)**: messo in pausa per ora — richiede
-tempo dedicato (codice di training, non solo inferenza; incognita
-principale: fattibilità con 4GB VRAM). Da riprendere quando c'è un blocco
-di tempo libero.
+**Fine-tuning (Passo 2 di Daniele)**: in corso su SA-ConvONet.
+Dataset di training generato dai terreni sintetici con
+`utils/make_saconvonet_dataset.py` (input = scansioni simulate, occupancy =
+"sotto il fondale" dalla ground truth, stessa normalizzazione
+dell'inferenza); training con `neural_methods/SA-ConvONet/fine_tuning.py` e
+`configs/seabed/finetune_crop.yaml`. Il dry-run sulla GTX 1650 entra in
+memoria (~2 GB, ~1 s/iterazione, solo decoder). Prima di un run lungo: run
+di prova breve per verificare che la loss di validazione scenda.
 
-**Sliding window / valutazione online (Passo 3 di Daniele)**: prossimo
-fronte di lavoro attivo, **in una chat separata** per tenere i thread
-distinti — build naturale sull'infrastruttura accuratezza/completezza
-appena costruita, per derivare una funzione
+**Sliding window / valutazione online (Passo 3 di Daniele)**: implementato
+(sezione `sliding_window` in `config/config.yaml`, vale sia per
+`reconstruct_single_dataset.py` sia per `evaluate.py`): il CSV viene letto a
+blocchi, ricostruito a finestre di ping e i dati usati vengono scartati.
+Prossimo passo: misurare il tempo per finestra di ciascun metodo rispetto
+al budget (~40 s con i valori di default) e derivare una funzione
 `qualità_ricostruzione ≈ f(densità_locale, dimensione_finestra)` calibrata
 sui metodi già integrati, invece di usare la varianza di un GP generico
 scollegato dalla pipeline reale.

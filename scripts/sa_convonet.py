@@ -4,7 +4,11 @@ Pipeline neurale di ricostruzione 3D da point cloud (sonar) con SA-ConvONet
 
 SA-ConvONet (https://github.com/tangjiapeng/SA-ConvONet) parte da un modello
 Convolutional Occupancy Network pre-addestrato (ConvONet) e ne ottimizza i
-pesi in modo "sign-agnostic" per-scena a test-time. Usiamo la variante
+pesi in modo "sign-agnostic" per-scena a test-time. Qui l'ottimizzazione e'
+opzionale (sa_convonet.ottimizzazione_online in config): se disattivata si usa
+generate.py, cioe' ConvONet pre-addestrato senza adattamento; se attivata
+generate_optim_largescene.py, che adatta la rete alla scena prima di
+estrarre la mesh (molto piu' lento). Usiamo la variante
 `pointcloud_crop` (encoder a griglia 3D con finestra scorrevole, modello
 `room_grid64`): a differenza dei modelli ConvONet "stanza" (bounding box
 fissa, coordinate normalizzate), questa variante e' pensata per scene reali
@@ -16,7 +20,7 @@ questo script gira nell'ambiente conda "ricostruzione3d" (Open3D, per
 riusare utils/mesh.py), mentre SA-ConvONet richiede l'ambiente separato
 "sa_conet" (Python 3.6, PyTorch 1.4.0 + CUDA 10.1, torch_scatter). Il
 preprocessing dataset (helpers.../make_cropscene_dataset2.py) e la
-ricostruzione vera e propria (helpers.../generate.py) vengono quindi
+ricostruzione vera e propria (generate.py o generate_optim_largescene.py) vengono quindi
 lanciati come sottoprocessi nell'ambiente "sa_conet".
 
 Nota IMPORTANTE sulla PyTorch dell'ambiente "sa_conet": va installata dalla
@@ -31,7 +35,8 @@ verificato:
         https://data.pyg.org/whl/torch-1.4.0+cu101/torch_scatter-2.0.4-cp36-cp36m-linux_x86_64.whl
 
 I parametri di questa pipeline sono in config/config.yaml (sezione
-sa_convonet); l'esecuzione avviene tramite main.py nella root del progetto.
+sa_convonet); l'esecuzione avviene tramite reconstruct_single_dataset.py / evaluate.py
+(via utils/pipeline.py) nella root del progetto.
 """
 
 import glob
@@ -84,10 +89,36 @@ def esporta_point_cloud_sa_convonet(pcd: o3d.geometry.PointCloud, percorso_outpu
 # RICOSTRUZIONE SA-CONVONET
 # ---------------------------------------------------------------------------
 
+SOGLIA_ONLINE = 0.2  # soglia di estrazione con ottimizzazione online (= test.threshold del modello)
+
+
+def _checkpoint_locale(checkpoint_url: str) -> str:
+    """Percorso locale dei pesi pre-addestrati nella cache di torch.
+
+    generate_optim_largescene.py ricarica i pesi con torch.load(os.path.join(out_dir,
+    model_file)), che con un URL fallisce: serve il file gia' scaricato. La cache
+    viene riempita dalla prima esecuzione di generate.py (ottimizzazione_online: false).
+    """
+    if not checkpoint_url:
+        raise ValueError("Ottimizzazione online: test.model_file non trovato nel config SA-ConvONet")
+    if os.path.isfile(checkpoint_url):
+        return os.path.abspath(checkpoint_url)
+    torch_home = os.environ.get("TORCH_HOME", os.path.expanduser("~/.cache/torch"))
+    nome = os.path.basename(checkpoint_url)
+    for sottocartella in ("checkpoints", os.path.join("hub", "checkpoints")):
+        percorso = os.path.join(torch_home, sottocartella, nome)
+        if os.path.isfile(percorso):
+            return percorso
+    raise FileNotFoundError(
+        f"Pesi {nome} non trovati nella cache di torch ({torch_home}): lancia una volta "
+        f"SA-ConvONet con ottimizzazione_online: false per scaricarli")
+
 def ricostruisci_sa_convonet(pcd: o3d.geometry.PointCloud, nome_run: str,
                               sa_convonet_dir: str, conda_env: str, work_dir: str,
                               config_file: str, unit_size: float = 0.002,
-                              query_vol_size: int = 25):
+                              query_vol_size: int = 25, ottimizzazione_online: bool = False,
+                              online_iterazioni: int = 2000, online_passo_lr: int = 800,
+                              online_batch_size: int = 3, checkpoint_url: str = None):
     """Prepara il dataset nel formato atteso da SA-ConvONet (sottoprocesso su
     make_cropscene_dataset2.py, che centra/scala la point cloud in unita'
     coerenti col modello pre-addestrato) e poi lancia generate.py sulla
@@ -101,6 +132,16 @@ def ricostruisci_sa_convonet(pcd: o3d.geometry.PointCloud, nome_run: str,
         stanze Matterport, 10-20m) generano migliaia di crop e run da ore;
         valori piu' alti riducono i crop (piu' veloce) a scapito della
         risoluzione della mesh.
+
+    ottimizzazione_online: se True usa generate_optim_largescene.py
+        (adattamento sign-agnostic per-scena, "SA") invece di generate.py.
+        online_iterazioni / online_passo_lr / online_batch_size sovrascrivono
+        test_optim.n_iter / n_step / batch_size. Ogni online_passo_lr iterazioni
+        il learning rate decade E viene generata una mesh intermedia completa
+        (costo di un intero generate.py): conviene online_passo_lr non troppo piccolo.
+    checkpoint_url: pesi pre-addestrati (URL o file); se None si legge
+        test.model_file da config_file. Con l'ottimizzazione online serve il
+        file locale nella cache di torch (vedi _checkpoint_locale).
 
     Ritorna (mesh_o3d, tempo_calcolo_secondi).
     """
@@ -135,18 +176,33 @@ def ricostruisci_sa_convonet(pcd: o3d.geometry.PointCloud, nome_run: str,
     # point2mesh/ppsurf) -- genero quindi un config che eredita da
     # config_file ma sovrascrive path dinamici con quelli reali di questo run.
     config_run = os.path.join(cartella_lavoro, "run_config.yaml")
+    contenuto_config = {
+        "inherit_from": config_file,
+        "data": {
+            "path": cartella_normalizzata,
+            "unit_size": unit_size,
+            "query_vol_size": query_vol_size,
+        },
+        "training": {"out_dir": os.path.join(cartella_lavoro, "out")},
+    }
+    if ottimizzazione_online:
+        if checkpoint_url is None:
+            with open(os.path.join(sa_convonet_dir, config_file)) as fc:
+                checkpoint_url = (yaml.safe_load(fc).get("test") or {}).get("model_file")
+        contenuto_config["test"] = {"model_file": _checkpoint_locale(checkpoint_url)}
+        contenuto_config["test_optim"] = {
+            "n_iter": online_iterazioni,
+            "n_step": online_passo_lr,
+            "batch_size": online_batch_size,
+            # una sola soglia (= test.threshold di generate.py): lo script genera una mesh
+            # completa per ogni soglia a ogni passo, con le 3 di default il costo triplica
+            "threshold": [SOGLIA_ONLINE],
+        }
     with open(config_run, "w") as f:
-        yaml.safe_dump({
-            "inherit_from": config_file,
-            "data": {
-                "path": cartella_normalizzata,
-                "unit_size": unit_size,
-                "query_vol_size": query_vol_size,
-            },
-            "training": {"out_dir": os.path.join(cartella_lavoro, "out")},
-        }, f)
+        yaml.safe_dump(contenuto_config, f)
 
-    cmd_generate = [python_sa_convonet, "-u", "generate.py", config_run]
+    script_generazione = "generate_optim_largescene.py" if ottimizzazione_online else "generate.py"
+    cmd_generate = [python_sa_convonet, "-u", script_generazione, config_run]
     print(f"\n[SA-ConvONet] Lancio ricostruzione nell'ambiente '{conda_env}' "
           f"(puo' richiedere diversi minuti)...")
     print(f"  {' '.join(cmd_generate)}")
@@ -179,7 +235,10 @@ def ricostruisci_sa_convonet(pcd: o3d.geometry.PointCloud, nome_run: str,
     # categoria = 'large_scenes' (nome cartella creato da
     # make_cropscene_dataset2.py) e modelname = nome_run. Uso glob per
     # restare robusti a eventuali differenze di dettaglio nel config.
-    pattern_output = os.path.join(cartella_lavoro, "out", "**", f"{nome_run}.off")
+    # con l'ottimizzazione online la mesh adattata e' <nome_run>_final_th<soglia>.off
+    # (<nome_run>.off e' quella prima dell'adattamento, generata comunque dallo script)
+    nome_mesh = f"{nome_run}_final_th{SOGLIA_ONLINE}.off" if ottimizzazione_online else f"{nome_run}.off"
+    pattern_output = os.path.join(cartella_lavoro, "out", "**", nome_mesh)
     candidati = glob.glob(pattern_output, recursive=True)
     if not candidati:
         raise FileNotFoundError(f"Nessun file .off trovato con il pattern: {pattern_output}")

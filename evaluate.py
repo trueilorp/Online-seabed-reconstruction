@@ -15,6 +15,8 @@ di config/config.yaml; split, limit, metodi e tau sovrascrivibili da riga di com
 
 Output in <evaluation.output_dir>/<split>/:
   meshes/<id>_<metodo>[_sw].ply, metriche_per_terreno.csv, metriche_per_famiglia.csv
+I due CSV si accumulano tra esecuzioni (colonna "run" = istante di avvio); le mesh
+invece vengono sovrascritte dall'ultima esecuzione.
 Con sliding_window.abilitato in config la ricostruzione avviene a finestre di ping (suffisso _sw).
 
 Uso:
@@ -22,6 +24,7 @@ Uso:
 """
 
 import argparse
+import datetime
 import os
 import traceback
 
@@ -70,19 +73,36 @@ def famiglie_da_manifest(synthetic_dir: str) -> dict:
 	return dict(zip(df["id"], df["family"]))
 
 
-def salva_csv(righe: list, cartella_out: str):
+CSV_TERRENO = "metriche_per_terreno.csv"
+CSV_FAMIGLIA = "metriche_per_famiglia.csv"
+
+
+def leggi_csv_precedente(percorso: str) -> pd.DataFrame:
+	"""Righe delle esecuzioni precedenti (vuoto se il file non c'e')."""
+	return pd.read_csv(percorso) if os.path.exists(percorso) else pd.DataFrame()
+
+
+def _accoda(precedenti: pd.DataFrame, nuove: pd.DataFrame) -> pd.DataFrame:
+	tutte = pd.concat([precedenti, nuove], ignore_index=True)
+	return tutte[["run"] + [c for c in tutte.columns if c != "run"]]  # run sempre prima colonna
+
+
+def salva_csv(righe: list, cartella_out: str, precedenti_terreno: pd.DataFrame,
+			  precedenti_famiglia: pd.DataFrame):
+	"""Righe di questa esecuzione in coda a quelle precedenti; le medie per famiglia sono per singola run."""
 	df = pd.DataFrame(righe)
-	df.to_csv(os.path.join(cartella_out, "metriche_per_terreno.csv"), index=False)
+	_accoda(precedenti_terreno, df).to_csv(os.path.join(cartella_out, CSV_TERRENO), index=False)
 
 	ok = df[df["errore"].isna()] if "errore" in df else df
 	if ok.empty:
 		return
 	colonne = ["accuratezza_media", "accuratezza_p90", "completezza_media", "completezza_p90",
 			   "copertura", "n_vertici", "tempo_calcolo_secondi"]
-	gruppi = ["famiglia", "metodo", "sliding_window"]
+	gruppi = ["run", "famiglia", "metodo", "sliding_window"]
 	per_famiglia = ok.groupby(gruppi)[colonne].mean()
 	per_famiglia.insert(0, "n_terreni", ok.groupby(gruppi).size())
-	per_famiglia.reset_index().to_csv(os.path.join(cartella_out, "metriche_per_famiglia.csv"), index=False)
+	_accoda(precedenti_famiglia, per_famiglia.reset_index()).to_csv(
+		os.path.join(cartella_out, CSV_FAMIGLIA), index=False)
 
 
 def main():
@@ -105,6 +125,10 @@ def main():
 	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
 	terreni = elenca_terreni(ev["synthetic_dir"], args.split, args.limit)
 	righe = []
+	# i CSV si accumulano tra esecuzioni: ogni run e' identificata dall'istante di avvio
+	run = datetime.datetime.now().isoformat(timespec="seconds")
+	precedenti_terreno = leggi_csv_precedente(os.path.join(cartella_out, CSV_TERRENO))
+	precedenti_famiglia = leggi_csv_precedente(os.path.join(cartella_out, CSV_FAMIGLIA))
 
 	# in sequenza: i metodi neurali condividono la work_dir
 	for i, id_terreno in enumerate(terreni, 1):
@@ -118,10 +142,11 @@ def main():
 
 		for metodo in args.methods:
 			print(f"\n=== [{i}/{len(terreni)}] {id_terreno} - {metodo} ===")
-			riga = {"id": id_terreno, "famiglia": famiglia, "metodo": metodo, "sliding_window": sliding_window}
+			riga = {"run": run, "id": id_terreno, "famiglia": famiglia, "metodo": metodo, "sliding_window": sliding_window}
 			try:
 				config = config_per_terreno(config_base, percorso_scan, metodo)
 				mesh, _, tempo, nome = ricostruisci(config)
+				riga["metodo"] = nome  # es. "sa_convonet_online": distinto dalla variante senza adattamento
 
 				mesh_out = os.path.join(cartella_mesh, f"{id_terreno}_{nome}{suffisso}.ply")
 				o3d.io.write_triangle_mesh(mesh_out, mesh)
@@ -134,7 +159,8 @@ def main():
 				traceback.print_exc()
 				riga["errore"] = f"{type(e).__name__}: {e}"
 			righe.append(riga)
-			salva_csv(righe, cartella_out)  # riscritto a ogni passo: un crash non perde i risultati
+			# riscritto a ogni passo: un crash non perde i risultati
+			salva_csv(righe, cartella_out, precedenti_terreno, precedenti_famiglia)
 
 	print(f"\nRisultati in: {cartella_out}")
 
