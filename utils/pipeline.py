@@ -2,7 +2,7 @@
 Pipeline di ricostruzione 3D condivisa da reconstruct_single_dataset.py ed evaluate.py.
 
 Contiene il caricamento della config, il preprocessing comune (caricamento CSV,
-pulizia, normali) e gli esecutori dei singoli algoritmi, selezionabili tramite
+pulizia) e gli esecutori dei singoli algoritmi, selezionabili tramite
 ESECUTORI[config["algorithm"]].
 
 Punto d'ingresso per gli script: ricostruisci(config), che esegue l'algoritmo
@@ -30,11 +30,6 @@ from scripts.poisson import (
 	ricostruisci_poisson,
 	pulisci_mesh,
 )
-from scripts.point2mesh import (
-	subsample_aggressivo,
-	ricostruisci_point2mesh,
-	stampa_curva_loss,
-)
 from scripts.ppsurf import (
 	sottocampiona_se_necessario,
 	ricostruisci_ppsurf,
@@ -60,13 +55,19 @@ def filtri_da_config(config: dict) -> dict:
 	)
 
 
+def voxel_da_config(config: dict):
+	"""Lato del voxel di downsampling in metri, None se il downsampling e' disattivato."""
+	ds = config["preprocessing"]["downsampling"]
+	return ds["voxel_size"] if ds["abilitato"] else None
+
+
 def pulisci_da_config(pcd: o3d.geometry.PointCloud, config: dict) -> o3d.geometry.PointCloud:
-	pre = config["preprocessing"]
+	outlier = config["preprocessing"]["rimozione_outlier"]
 	return pulisci_point_cloud(
 		pcd,
-		voxel_size=pre["voxel_size"],
-		nb_neighbors=pre["nb_neighbors"],
-		std_ratio=pre["std_ratio"],
+		voxel_size=voxel_da_config(config),
+		nb_neighbors=outlier["nb_neighbors"] if outlier["abilitato"] else None,
+		std_ratio=outlier["std_ratio"],
 	)
 
 
@@ -97,18 +98,9 @@ def config_per_terreno(config_base: dict, percorso_scan: str, metodo: str) -> di
 	return config
 
 
-def stima_normali_da_config(pcd: o3d.geometry.PointCloud, config: dict) -> o3d.geometry.PointCloud:
-	pre = config["preprocessing"]
-	return stima_normali(
-		pcd,
-		raggio_ricerca=pre["raggio_ricerca_normali"],
-		max_vicini=pre["max_vicini_normali"],
-	)
-
-
 def esegui_poisson(pcd: o3d.geometry.PointCloud, config: dict):
 	p = config["poisson"]
-	pcd = stima_normali_da_config(pcd, config)
+	pcd = stima_normali(pcd)
 
 	inizio = time.time()
 	mesh = ricostruisci_poisson(pcd, profondita=p["profondita"],
@@ -119,37 +111,11 @@ def esegui_poisson(pcd: o3d.geometry.PointCloud, config: dict):
 	mesh.compute_vertex_normals()
 	return mesh, pcd, tempo_calcolo, "poisson"
 
-
-def esegui_point2mesh(pcd: o3d.geometry.PointCloud, config: dict):
-	p2m = config["point2mesh"]
-	paths = config["paths"]
-
-	pcd = subsample_aggressivo(pcd, p2m["max_punti"])
-	pcd = stima_normali_da_config(pcd, config)
-
-	nome_run = nome_run_da_config(config)
-	point2mesh_dir = os.path.join(paths["neural_methods"], "point2mesh")
-	manifold_dir = os.path.join(paths["neural_methods"], "Manifold", "build")
-
-	mesh, tempo_calcolo, loss_per_iterazione = ricostruisci_point2mesh(
-		pcd, nome_run,
-		point2mesh_dir=point2mesh_dir, manifold_dir=manifold_dir,
-		conda_env=p2m["conda_env"], work_dir=p2m["work_dir"],
-		iterations=p2m["iterations"],
-		num_facce_mesh_iniziale=p2m["initial_mesh_faces"],
-		manifold_res=p2m["manifold_res"],
-		export_interval=p2m["export_interval"],
-	)
-	stampa_curva_loss(loss_per_iterazione)
-	return mesh, pcd, tempo_calcolo, "point2mesh"
-
-
 def esegui_ppsurf(pcd: o3d.geometry.PointCloud, config: dict):
 	pps = config["ppsurf"]
 	paths = config["paths"]
 
 	pcd = sottocampiona_se_necessario(pcd, pps["max_punti"])
-	pcd = stima_normali_da_config(pcd, config)  # non usato da PPSurf, mantenuto per coerenza col preprocessing
 
 	nome_run = nome_run_da_config(config)
 	ppsurf_dir = os.path.join(paths["neural_methods"], "ppsurf")
@@ -166,8 +132,6 @@ def esegui_ppsurf(pcd: o3d.geometry.PointCloud, config: dict):
 def esegui_sa_convonet(pcd: o3d.geometry.PointCloud, config: dict):
 	sac = config["sa_convonet"]
 	paths = config["paths"]
-
-	pcd = stima_normali_da_config(pcd, config)
 
 	nome_run = nome_run_da_config(config)
 	sa_convonet_dir = os.path.join(paths["neural_methods"], "SA-ConvONet")
@@ -203,8 +167,15 @@ def raccogli_parametri(config: dict) -> dict:
 	algorithm = config["algorithm"]
 	parametri = {}
 	for chiave, valore in config["preprocessing"].items():
+		if isinstance(valore, dict):
+			# sottosezioni (downsampling, rimozione_outlier): flag in pre_<sezione>, parametri
+			# con il nome piatto di prima (pre_nb_neighbors, ...) per restare confrontabili con le righe vecchie
+			parametri[f"pre_{chiave}"] = formatta(valore["abilitato"])
+			for k, v in valore.items():
+				if k not in ("abilitato", "voxel_size"):
+					parametri[f"pre_{k}"] = formatta(v)
 		# voxel_size ed escludi_classi hanno gia' colonne dedicate (presenti anche nelle righe vecchie)
-		if chiave not in ("voxel_size", "escludi_classi"):
+		elif chiave != "escludi_classi":
 			parametri[f"pre_{chiave}"] = formatta(valore)
 	for chiave, valore in config["valutazione"].items():
 		parametri[f"val_{chiave}"] = formatta(valore)
@@ -221,7 +192,6 @@ def raccogli_parametri(config: dict) -> dict:
 
 ESECUTORI = {
 	"poisson": esegui_poisson,
-	"point2mesh": esegui_point2mesh,
 	"ppsurf": esegui_ppsurf,
 	"sa_convonet": esegui_sa_convonet,
 }
@@ -307,7 +277,7 @@ def ricostruisci_a_finestre(config: dict):
 	sw = config["sliding_window"]
 	metodo = config["algorithm"]
 	filtri = filtri_da_config(config)
-	voxel = config["preprocessing"]["voxel_size"]
+	voxel = voxel_da_config(config)
 	nome_base = nome_run_da_config(config)
 	rng = np.random.default_rng(0)
 

@@ -26,13 +26,25 @@ def ricostruisci_poisson(pcd: o3d.geometry.PointCloud, profondita: int = 9,
                 sono scarsi. Questo parametro rimuove i vertici nel percentile più
                 basso di densità (0.02 = rimuove il 2% più scarso).
     """
+    mesh, densita = poisson_grezzo(pcd, profondita)
+    return taglia_bassa_densita(mesh, densita, rimuovi_bassa_densita)
+
+
+def poisson_grezzo(pcd: o3d.geometry.PointCloud, profondita: int = 9):
+    """Mesh Poisson prima del taglio, con la densita' per vertice (quanti punti di input
+    sostengono quella zona: bassa dove Poisson ha "inventato" superficie)."""
     mesh, densita = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd, depth=profondita
     )
-    densita = np.asarray(densita)
+    return mesh, np.asarray(densita)
+
+
+def taglia_bassa_densita(mesh: o3d.geometry.TriangleMesh, densita: np.ndarray,
+                          rimuovi_bassa_densita: float) -> o3d.geometry.TriangleMesh:
+    """Rimuove i vertici sotto il quantile rimuovi_bassa_densita delle densita' (su una copia)."""
+    mesh = o3d.geometry.TriangleMesh(mesh)
     soglia = np.quantile(densita, rimuovi_bassa_densita)
-    vertici_da_rimuovere = densita < soglia
-    mesh.remove_vertices_by_mask(vertici_da_rimuovere)
+    mesh.remove_vertices_by_mask(densita < soglia)
 
     print(f"[4/5] Mesh Poisson: {len(mesh.vertices)} vertici, {len(mesh.triangles)} triangoli")
     return mesh

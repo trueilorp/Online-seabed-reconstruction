@@ -123,9 +123,17 @@ def pulisci_point_cloud(pcd: o3d.geometry.PointCloud,
 						 voxel_size=None,
 						 nb_neighbors: int = 20,
 						 std_ratio: float = 2.0) -> o3d.geometry.PointCloud:
-	
-	pcd_ds = pcd.voxel_down_sample(voxel_size=voxel_size)
-	print(f"[2/5] Dopo downsampling (voxel={voxel_size}): {len(pcd_ds.points)} punti")
+	"""voxel_size=None salta il downsampling, nb_neighbors=None salta la rimozione degli outlier."""
+	if voxel_size is None:
+		pcd_ds = pcd
+		print(f"[2/5] Downsampling disattivato: {len(pcd_ds.points)} punti")
+	else:
+		pcd_ds = pcd.voxel_down_sample(voxel_size=voxel_size)
+		print(f"[2/5] Dopo downsampling (voxel={voxel_size}): {len(pcd_ds.points)} punti")
+
+	if nb_neighbors is None:
+		print("[2/5] Rimozione outlier disattivata")
+		return pcd_ds
 
 	pcd_clean, indici_validi = pcd_ds.remove_statistical_outlier(
 		nb_neighbors=nb_neighbors, std_ratio=std_ratio
@@ -136,12 +144,12 @@ def pulisci_point_cloud(pcd: o3d.geometry.PointCloud,
 	return pcd_clean
 
 
-def stima_normali(pcd: o3d.geometry.PointCloud, raggio_ricerca: float = 0.1,
-				   max_vicini: int = 30) -> o3d.geometry.PointCloud:
-
-	pcd.estimate_normals(
-		search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=raggio_ricerca, max_nn=max_vicini)
-	)
+def stima_normali(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
+	"""Normali per Poisson: piano tangente sui 30 vicini piu' prossimi (default Open3D, indipendente
+	dalla densita': un raggio fisso di 0.1 m col downsampling a 0.5 m non trovava vicini e lasciava
+	tutte le normali al default (0,0,1)), poi orientate verso l'alto (+Y): per un fondale visto dall'alto
+	"fuori" e' sempre l'acqua, piu' robusto della propagazione MST (orient_normals_consistent_tangent_plane)."""
+	pcd.estimate_normals()
 	pcd.orient_normals_to_align_with_direction(orientation_reference=np.array([0.0, 1.0, 0.0]))
 	print("[3/5] Normali stimate e orientate")
 	return pcd
@@ -265,7 +273,7 @@ def salva_metriche_csv(metriche: dict, percorso_csv: str = "../output/metriche_r
 	riga = {k: v for k, v in metriche.items() if k not in COLONNE_ESCLUSE_CSV}
 	riga["timestamp"] = datetime.datetime.now().isoformat(timespec="seconds")
 	riga["input_csv"] = input_csv
-	riga["voxel_size"] = voxel_size if voxel_size is not None else "auto"
+	riga["voxel_size"] = voxel_size if voxel_size is not None else "nessuno"  # None = downsampling disattivato
 	riga["escludi_classi"] = str(escludi_classi)
 	riga.update(parametri or {})
 

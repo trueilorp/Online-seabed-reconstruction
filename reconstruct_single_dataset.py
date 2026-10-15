@@ -25,6 +25,7 @@ from utils.pipeline import (
 	load_config,
 	ricostruisci,
 	raccogli_parametri,
+	voxel_da_config,
 )
 
 
@@ -59,7 +60,7 @@ def main():
 
 	salva_metriche_csv(
 		metriche, percorso_csv=paths["metriche_csv"],
-		input_csv=paths["input_csv"], voxel_size=pre["voxel_size"],
+		input_csv=paths["input_csv"], voxel_size=voxel_da_config(config),
 		escludi_classi=pre["escludi_classi"], parametri=raccogli_parametri(config),
 	)
 

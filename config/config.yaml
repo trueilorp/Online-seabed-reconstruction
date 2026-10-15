@@ -13,11 +13,13 @@ preprocessing:
   altitude_max: null                 # tieni solo punti con altitude <= questo valore (null = nessun limite)
   escludi_zona_x: null               # [min, max] per escludere una zona rettangolare X (es. sosta barca)
   escludi_zona_z: null               # [min, max] per escludere una zona rettangolare Z (es. sosta barca)
-  voxel_size: 0.5                    # dimensione voxel per downsampling in metri (null = stimato automaticamente)
-  nb_neighbors: 20                   # filtro outlier: quanti vicini considerare per punto
-  std_ratio: 2.0                     # filtro outlier: soglia in deviazioni standard
-  raggio_ricerca_normali: 0.1        # raggio di ricerca per la stima delle normali
-  max_vicini_normali: 30             # numero massimo di vicini usati per la stima delle normali
+  downsampling:
+    abilitato: true                  # false = nessun voxel downsampling (tutti i punti del CSV)
+    voxel_size: 0.5                  # dimensione voxel per downsampling in metri
+  rimozione_outlier:
+    abilitato: true                  # false = nessun filtro statistico degli outlier
+    nb_neighbors: 20                 # quanti vicini considerare per punto
+    std_ratio: 2.0                   # soglia in deviazioni standard
 
 valutazione:
   calcola_autointersezioni: false    # true = controllo completo (lento su mesh grandi)
@@ -38,17 +40,8 @@ sliding_window:
 # METHODS
 poisson:
   profondita: 9                      # risoluzione octree Poisson (8-10 tipico)
-  rimuovi_bassa_densita: 0.35        # percentile di vertici a bassa densità da rimuovere
+  rimuovi_bassa_densita: 0.05        # percentile di vertici a bassa densità da rimuovere
   dimensione_min_componente: 100     # pulizia mesh: componenti connesse più piccole vengono rimosse
-
-point2mesh:
-  max_punti: 8000                    # subsample aggressivo dopo pulizia (GPU 4GB VRAM)
-  iterations: 1500                   # iterazioni di ottimizzazione
-  export_interval: 100               # ogni quante iterazioni esportare una mesh intermedia
-  initial_mesh_faces: 2000           # facce target per la mesh iniziale (convex hull semplificato)
-  manifold_res: 20000                # risoluzione octree usata dal software Manifold per il remesh
-  conda_env: "point2mesh"            # nome dell'ambiente conda dedicato
-  work_dir: "output/point2mesh_tmp"  # file temporanei scambiati col sottoprocesso
 
 ppsurf:
   max_punti: 250000                  # rete di sicurezza per dataset molto grandi (soglia consigliata dal README)
@@ -84,8 +77,8 @@ sa_convonet:
 evaluation:
   synthetic_dir: "data/synthetic"    # contiene <split>/<id>/{<id>_scan.csv, <id>_ground_truth.obj} e manifest.csv
   output_dir: "output/evaluation"    # risultati in <output_dir>/<split>/ (mesh + CSV per terreno e per famiglia)
-  split: "test"                       # "val" o "test"
-  limit: 1                        # numero massimo di terreni (in ordine alfabetico); null = tutti quelli dello split
+  split: "val"                       # "val" o "test"
+  limit: 1                        # terreni per famiglia (i primi in ordine alfabetico); null = tutti quelli dello split
   metodi: ["sa_convonet"]                # chiavi di ESECUTORI in pipeline.py, eseguite in sequenza
   n_campioni: 100000                 # punti campionati su ciascuna superficie per accuratezza/completezza
-  tau: 0.5                           # soglia di copertura, m (pari al voxel_size del preprocessing)
+  tau: 0.5                           # soglia di copertura, m (pari al voxel_size del preprocessing; % del fondale vero che ha una superficie ricostruita entro 50 cm (tau = 0.5)

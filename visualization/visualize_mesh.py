@@ -1,7 +1,7 @@
 import open3d as o3d
 
 # --- Imposta qui il file da aprire ---
-PERCORSO_MESH = "output/evaluation/val/meshes/flat_sand_012_poisson.ply" # "output/mesh/Terrain_unity/mesh_ppsurf.ply"
+PERCORSO_MESH = "data/synthetic/val/flat_sand_012/flat_sand_012_ground_truth.obj" # "output/mesh/Terrain_unity/mesh_ppsurf.ply"
 MOSTRA_WIREFRAME = False   # True per vedere anche gli spigoli dei triangoli sovrapposti
 CARTELLA_SCREENSHOT = "output/screenshot_mesh"   # cartella dove salvare le immagini (creata se non esiste)
 
@@ -27,7 +27,8 @@ def visualizza(percorso: str, wireframe: bool = False):
     os.makedirs(CARTELLA_SCREENSHOT, exist_ok=True)
 
     vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window(window_name=percorso)
+    # dimensioni/posizione esplicite: su WSLg i default (1920x1080) possono finire fuori schermo
+    vis.create_window(window_name=percorso, width=1280, height=720, left=100, top=100)
     vis.add_geometry(mesh)
 
     if wireframe:

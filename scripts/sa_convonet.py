@@ -72,16 +72,13 @@ def trova_python_ambiente_conda(nome_ambiente: str) -> str:
 
 
 def esporta_point_cloud_sa_convonet(pcd: o3d.geometry.PointCloud, percorso_output_ply: str):
-    """make_cropscene_dataset2.py (script di SA-ConvONet) legge il .ply con
-    plyfile cercando le proprieta' x,y,z,nx,ny,nz -- richiede quindi le
-    normali gia' stimate, senza bisogno di colori."""
-    if not pcd.has_normals():
-        raise ValueError("La point cloud non ha normali stimate: chiama stima_normali() prima")
+    """Solo x,y,z: la rete non usa le normali (l'encoder legge solo punti e indici).
+    make_cropscene_dataset2.py, se nel .ply mancano nx,ny,nz, stampa un warning e
+    salva normali fittizie, che servono solo perche' il dataloader si aspetta la chiave."""
     os.makedirs(os.path.dirname(percorso_output_ply), exist_ok=True)
-    pcd_senza_colori = o3d.geometry.PointCloud()
-    pcd_senza_colori.points = pcd.points
-    pcd_senza_colori.normals = pcd.normals
-    o3d.io.write_point_cloud(percorso_output_ply, pcd_senza_colori)
+    pcd_solo_punti = o3d.geometry.PointCloud()
+    pcd_solo_punti.points = pcd.points
+    o3d.io.write_point_cloud(percorso_output_ply, pcd_solo_punti)
     print(f"  Point cloud esportata per SA-ConvONet: {percorso_output_ply} ({len(pcd.points)} punti)")
 
 

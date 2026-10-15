@@ -5,7 +5,7 @@ Converte i terreni sintetici (data/synthetic) nel dataset di training di SA-Conv
 Per ogni terreno <split>/<id>/ scrive <out>/seabed/<id>/:
   - pointcloud.npz : la SCANSIONE simulata (<id>_scan.csv), non la GT: e' il dominio da
                      imparare. Preprocessata come in inferenza (utils/pipeline.py: voxel,
-                     outlier, normali) e normalizzata come make_cropscene_dataset2.py
+                     outlier) e normalizzata come make_cropscene_dataset2.py
                      (loc = centro del bounding box, scale = estensione massima, float16),
                      cosi' unit_size corrisponde agli stessi metri in training e in inferenza.
   - points_iou.npz : punti query con occupancy vera, nello stesso spazio normalizzato.
@@ -31,7 +31,7 @@ import open3d as o3d
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root del progetto
 
 from utils.mesh import top_surface
-from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud, stima_normali_da_config
+from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
 
 CATEGORIA = "seabed"  # deve coincidere con data.classes nel config di fine-tuning
 
@@ -72,13 +72,14 @@ def converti_terreno(config: dict, percorso_gt: str, cartella_out: str, n_punti:
 
 	# --- input: scansione con lo stesso preprocessing dell'inferenza (esegui_sa_convonet)
 	pcd = carica_e_pulisci_point_cloud(config)
-	pcd = stima_normali_da_config(pcd, config)
 	punti = np.asarray(pcd.points)
-	normali = np.asarray(pcd.normals)
 	loc, scale = normalizzazione_scena(punti)
+	# normali fittizie come make_cropscene_dataset2.py senza nx,ny,nz: la rete non le usa,
+	# ma il dataloader (PatchPointCloudField) si aspetta la chiave
+	normali = np.full_like(punti, 1 / np.sqrt(3))
 	np.savez(os.path.join(cartella_out, "pointcloud.npz"),
 			 points=((punti - loc) / scale).astype(np.float16),
-			 normals=(normali / np.linalg.norm(normali, axis=1, keepdims=True)).astype(np.float16),
+			 normals=normali.astype(np.float16),
 			 loc=loc.astype(np.float64), scale=np.float64(scale))
 
 	# --- query: vicino al fondale (rumore di 1 e 3 voxel) + uniformi nella zona raggiungibile dai crop

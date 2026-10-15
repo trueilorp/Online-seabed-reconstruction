@@ -87,9 +87,7 @@ def esporta_point_cloud_ppsurf(pcd: o3d.geometry.PointCloud, percorso_output_ply
     occupancy_data_module.py: 'pts = np.array(mesh.vertices)') -- le normali
     vengono SEMPRE ignorate, indipendentemente dal formato di input (anche per
     .xyz la documentazione dice esplicitamente che le colonne oltre le prime 3
-    vengono scartate). stima_normali() viene comunque chiamata a monte nella
-    pipeline per restare coerenti con le altre pipeline di confronto (stesso
-    preprocessing), ma il suo output non viene usato da PPSurf."""
+    vengono scartate). Per questo la pipeline non stima le normali per PPSurf."""
     os.makedirs(os.path.dirname(percorso_output_ply), exist_ok=True)
     pcd_solo_punti = o3d.geometry.PointCloud()
     pcd_solo_punti.points = pcd.points

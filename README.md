@@ -10,6 +10,12 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 .
 ├── reconstruct_single_dataset.py        # entry point: ricostruisce il dataset in config/config.yaml con l'algoritmo scelto
 ├── evaluate.py                          # benchmark dei metodi sui terreni sintetici vs ground truth (sezione evaluation del config)
+├── benchmark/
+│   ├── tempo_poisson.sh                 # tempi per fase (+ RAM/VRAM, chamfer/F-score) di Poisson
+│   ├── tempo_ppsurf.sh                  # idem PPSurf: avvio librerie vs "pps.py rec" completo
+│   ├── tempo_sa_convonet.sh             # idem SA-ConvONet: avvio, preparazione dataset, generate.py
+│   ├── sweep_densita_poisson.py         # sweep di poisson.rimuovi_bassa_densita sui terreni sintetici (F-score/Chamfer)
+│   └── comune.sh, prepara_input.py, ... # funzioni condivise; risultati in output/benchmark/
 ├── config/
 │   └── config.yaml                      # percorsi + parametri condivisi e specifici per algoritmo
 ├── data/
@@ -24,7 +30,6 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 │   └── make_saconvonet_dataset.py       # terreni sintetici -> dataset di fine-tuning SA-ConvONet
 ├── scripts/
 │   ├── poisson.py                       # ricostruzione classica: Poisson Surface Reconstruction (Open3D)
-│   ├── point2mesh.py                    # ricostruzione neurale: Point2Mesh (self-prior, sottoprocesso)
 │   ├── ppsurf.py                        # ricostruzione neurale: PPSurf (patch-based, sottoprocesso)
 │   ├── sa_convonet.py                   # ricostruzione neurale: SA-ConvONet (pointcloud_crop, sottoprocesso)
 │   └── confronta_mesh_ground_truth.py   # accuratezza/completezza/copertura + heatmap/sezione/istogrammi vs ground truth
@@ -51,7 +56,7 @@ e i `.obj` risultanti vanno copiati manualmente in `data/sonar/`.
 Ambiente: WSL2 (Ubuntu 22.04) su Windows, GPU NVIDIA GTX 1650 (4GB VRAM).
 Ambienti Python gestiti con conda, separati per progetto:
 - `ricostruzione3d` — Open3D, numpy, pandas, matplotlib (pipeline classica + analisi)
-- `point2mesh` — ambiente dedicato per l'esperimento Point2Mesh (concluso)
+- `point2mesh` — ambiente dedicato per l'esperimento Point2Mesh (concluso; codice rimosso dalla pipeline, recuperabile dalla history git)
 - `ppsurf` — PyTorch + CUDA 11.7-12.1, PyTorch-Lightning, PyG (pipeline PPSurf)
 - `sa_conet` — Python 3.6, PyTorch 1.4.0 + CUDA 10.1, torch_scatter (pipeline SA-ConvONet)
 
@@ -78,6 +83,8 @@ identificata (densità anomala fino a 8000 punti/cella, causa di un artefatto
   compatti genus-0), mentre il dato sonar è una superficie aperta e allungata
   ("a nastro", pattern di scansione multibeam). Più iterazioni peggiorano la
   fedeltà (non è un problema di tuning, ma di mismatch strutturale).
+  Per questo `scripts/point2mesh.py` e la sezione `point2mesh` del config
+  sono stati rimossi (restano nella history git).
 - **PPSurf** (patch-based, ricostruisce porzione per porzione) va nettamente
   meglio di Point2Mesh ma resta dietro Poisson — plausibilmente perché il
   modello pre-addestrato non ha mai visto rumore/pattern tipici del sonar
@@ -176,6 +183,50 @@ molto alta) può risultare *peggiore* in completezza di un metodo che lascia
 meno buchi ma è localmente meno preciso — le due metriche vanno sempre
 lette insieme, mai una sola.
 
+### Metriche di superficie: Chamfer e F-score, contro il solo fondale
+
+`evaluate.py` (e gli script di `benchmark/`, che usano la stessa funzione
+`metriche_superficie`) riportano anche metriche superficie-superficie, con
+distanza esatta punto-superficie su `n_campioni` punti uniformi per lato:
+
+- **chamfer** = (distanza media ricostruzione→fondale + fondale→ricostruzione) / 2, in metri
+- **precisione** = frazione di punti della ricostruzione entro `tau` dal fondale
+- **richiamo** = frazione di punti del fondale entro `tau` dalla ricostruzione (= copertura)
+- **fscore** = media armonica di precisione e richiamo
+
+**Perché "solo fondale" e non la GT intera.** La ground truth sintetica non
+è solo il fondale: è un **blocco solido chiuso** (fondale + pareti verticali
++ fondo piatto). Pareti e fondo servono solo a chiudere la mesh, il sonar non
+li vede mai e nessun metodo dovrebbe ricostruirli. `top_surface`
+(`utils/mesh.py`) li stacca, tenendo solo il fondale.
+
+```
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~      fondale (heightmap): l'unica cosa che il sonar vede
+        |\                      /|
+ parete | \  tenda spuria      / | parete
+        |                        |
+        +------------------------+      fondo piatto (quota minima)
+```
+
+I metodi impliciti tendono a chiudere la superficie: Poisson crea "tende" che
+scendono dai bordi o una bolla che si richiude sotto (il filtro di bassa
+densità ne toglie solo una parte), PPSurf e SA-ConvONet possono generare
+superfici spurie verticali o sotto il fondale (vedi il guscio doppio più
+sotto). Una superficie spuria che passa vicino alle pareti o al fondo della GT:
+
+- **contro la GT intera** ha distanza ≈ 0 → l'errore viene **premiato** come corretto;
+- **contro il solo fondale** è lontana → viene **penalizzata**, com'è giusto.
+
+Per questo completezza, copertura, chamfer e F-score usano il solo fondale
+(altrimenti, nel verso opposto, pareti e fondo mai ricostruiti conterebbero
+come mancanti). Fa eccezione `accuratezza_*`, che per ora resta misurata
+contro la **GT intera** (per restare confrontabile con i CSV già salvati):
+in caso di dubbio leggere `precisione`/`chamfer`, che questo errore non lo
+possono premiare. In pratica le due misure spesso coincidono: il problema
+c'è solo quando la superficie spuria passa vicino a bordi o base del
+terreno; se la scansione non arriva ai bordi, le tende cadono nel vuoto e
+sono penalizzate in entrambi i casi.
+
 ### Risultati su `Terrain_unity.csv` (dati puliti, post-fix, parametri tarati)
 
 | Metodo | Accuratezza media | Completezza media | Hausdorff (completezza) | Tempo |
@@ -198,6 +249,27 @@ Curva a 4 punti su `Terrain_unity.csv` (GT completezza media): 0.02→0.868,
 compromesso: area di superficie coperta scende da 6.298 a 1.943 m² (più
 buchi, ma "onesti" — dove Poisson ricostruisce, il profilo di sezione
 segue bene il ground truth). Valori oltre 0.35 non ancora esplorati.
+
+**Aggiornamento: soglia rifatta a 0.05 dopo il fix delle normali.** La
+curva sopra era falsata: le normali venivano stimate con un raggio fisso di
+0.1 m, ma dopo il downsampling a voxel 0.5 m nessun punto aveva vicini
+entro quel raggio e tutte le normali restavano al default (0,0,1). Ora
+`stima_normali` (`utils/mesh.py`) usa i 30 vicini più prossimi (default
+Open3D), indipendente dalla densità, e le normali servono solo a Poisson
+(PPSurf e SA-ConvONet non le usano: niente stima per loro, a SA-ConvONet
+arrivano normali fittizie solo perché il dataloader si aspetta la chiave).
+Con le normali corrette, `benchmark/sweep_densita_poisson.py` (6 terreni
+sintetici dello split val, 1 per famiglia, F-score e Chamfer contro il
+fondale, `tau` = 0.5 m):
+
+| Quantile | 0.0 | 0.02 | 0.03 | **0.05** | 0.07 | 0.1 | 0.2 | 0.35 |
+|---|---|---|---|---|---|---|---|---|
+| F-score medio | 0.903 | 0.976 | 0.990 | **0.998** | 0.995 | 0.984 | 0.936 | 0.820 |
+| Chamfer medio | 0.34 m | 0.08 m | 0.06 m | **0.05 m** | 0.05 m | 0.07 m | 0.13 m | 0.30 m |
+
+Il massimo è netto a 0.05, che diventa il default in `config/config.yaml`.
+I risultati Poisson nella tabella su `Terrain_unity.csv` qui sopra sono
+precedenti al fix, quindi con la vecchia soglia 0.35.
 
 ### Tuning SA-ConvONet: `unit_size`/`query_vol_size`
 
@@ -264,8 +336,11 @@ attorno ai punti (strato alto ~0.3 m sopra il fondale vero, strato basso
 ~0.8 m sotto): la loss sign-agnostic non distingue sopra da sotto, quindi
 mette superficie su entrambi i lati. Lo stesso guscio doppio si vede in
 PPSurf (98% dei raggi, ~1 m): la sua copertura alta va letta con questo in
-mente. Le metriche attuali (distanze medie) non penalizzano esplicitamente
-una superficie doppia — da tenere presente nei confronti.
+mente. Le distanze medie (accuratezza/completezza) non penalizzano
+esplicitamente una superficie doppia — da tenere presente nei confronti; la
+`precisione` (e quindi l'F-score), aggiunta dopo, la penalizza quando lo
+strato spurio dista dal fondale più di `tau` (es. lo strato basso a ~0.8 m
+con `tau` = 0.5 m).
 
 **Decisione**: niente adattamento online. L'adattamento al dominio sonar va
 fatto *offline*, con il fine-tuning supervisionato sui terreni sintetici;
@@ -288,10 +363,17 @@ di prova breve per verificare che la loss di validazione scenda.
 `reconstruct_single_dataset.py` sia per `evaluate.py`): il CSV viene letto a
 blocchi, ricostruito a finestre di ping e i dati usati vengono scartati.
 Prossimo passo: misurare il tempo per finestra di ciascun metodo rispetto
-al budget (~40 s con i valori di default) e derivare una funzione
+al budget (~40 s con i valori di default; strumenti pronti in `benchmark/`,
+che separano il costo fisso di avvio librerie/CUDA da quello della
+ricostruzione vera e propria, es. `bash benchmark/tempo_ppsurf.sh
+<scan.csv> [ripetizioni]`) e derivare una funzione
 `qualità_ricostruzione ≈ f(densità_locale, dimensione_finestra)` calibrata
 sui metodi già integrati, invece di usare la varianza di un GP generico
-scollegato dalla pipeline reale.
+scollegato dalla pipeline reale. Per studiare la dipendenza dalla densità,
+downsampling e rimozione degli outlier si possono disattivare dal config
+(`preprocessing.downsampling.abilitato`, `preprocessing.rimozione_outlier.abilitato`).
+`evaluate.py --limit N` prende i primi N terreni di **ogni famiglia**, non N
+in totale.
 
 Riferimento concettuale alternativo per il fine-tuning, non ancora
 esplorato: famiglia di metodi neurali *sonar-native* (NeuSIS/Qadri et al.
