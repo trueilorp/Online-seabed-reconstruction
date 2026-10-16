@@ -15,6 +15,8 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 │   ├── tempo_ppsurf.sh                  # idem PPSurf: avvio librerie vs "pps.py rec" completo
 │   ├── tempo_sa_convonet.sh             # idem SA-ConvONet: avvio, preparazione dataset, generate.py
 │   ├── sweep_densita_poisson.py         # sweep di poisson.rimuovi_bassa_densita sui terreni sintetici (F-score/Chamfer)
+│   ├── strato_singolo_ppsurf.py         # PPSurf: guscio doppio -> strato alto/basso/medio, metriche vs Poisson
+│   ├── crop_ppsurf.py                   # PPSurf su un crop di 25 m: griglia di marching cubes vs modello
 │   └── comune.sh, prepara_input.py, ... # funzioni condivise; risultati in output/benchmark/
 ├── config/
 │   └── config.yaml                      # percorsi + parametri condivisi e specifici per algoritmo
@@ -346,6 +348,64 @@ con `tau` = 0.5 m).
 fatto *offline*, con il fine-tuning supervisionato sui terreni sintetici;
 in ricostruzione resta un solo passaggio in avanti della rete
 (`generate.py`), da confrontare con Poisson sullo stesso budget per finestra.
+
+### PPSurf: il limite è la griglia, non il modello
+
+Sui terreni sintetici PPSurf restava ~7× peggio di Poisson (Chamfer ~0.34 m
+vs ~0.05 m), con il guscio doppio di ~1 m descritto sopra. Due prove per
+capire perché, entrambe sulle mesh di `evaluate.py` (split val, PPSurf con
+lo stesso preprocessing di Poisson: voxel 0.5 m + outlier).
+
+**Né il preprocessing né il guscio da solo spiegano il divario.** Senza
+downsampling (250k punti casuali, il tetto `ppsurf.max_punti`) su
+`flat_sand_012`: Chamfer 0.42 m vs 0.46 m, F-score 0.71 vs 0.70, stesso
+numero di vertici (~37k, fissato dalla griglia e non dall'input), tempo
+192 s vs 164 s. Collassando il guscio in uno strato singolo
+(`benchmark/strato_singolo_ppsurf.py`: primo hit dall'alto, dal basso e
+punto medio su una griglia XZ di 0.25 m), media sui 6 terreni `*_012`:
+
+| Variante | Chamfer | Precisione | Richiamo | F-score |
+|---|---|---|---|---|
+| PPSurf originale | 0.344 m | 0.67 | 0.96 | 0.79 |
+| strato alto | 0.548 m | 0.52 | 0.52 | 0.52 |
+| strato basso | 0.374 m | 0.80 | 0.75 | 0.77 |
+| strato medio | 0.262 m | 0.91 | 0.86 | 0.88 |
+| Poisson | 0.048 m | 1.00 | 1.00 | 1.00 |
+
+Il guscio non è simmetrico (lo strato basso è sempre più vicino al fondale
+vero), e anche il punto medio resta >5× Poisson.
+
+**La griglia di marching cubes sì.** `gen_resolution_global: 129` (ridotto
+dal default 257 per i 4 GB) copre tutta la scena: su 100 m sono celle di
+~0.8 m, contro ~0.21 m di Poisson a depth 9. `benchmark/crop_ppsurf.py`
+rilancia PPSurf su un crop di 25×25 m (stessa griglia 129 → celle ~0.2 m,
+stesso input) e misura tutte le varianti sul quadrato interno di 20 m
+(escluso il bordo del crop). Chamfer in metri:
+
+| Terreno | Completo originale (~0.8 m) | Completo medio | Crop originale (~0.2 m) | **Crop medio** | Poisson |
+|---|---|---|---|---|---|
+| flat_sand_012 | 0.454 | 0.301 | 0.113 | **0.035** | 0.039 |
+| ridges_012 | 0.302 | 0.325 | 0.107 | **0.054** | 0.031 |
+| rocky_012 | 0.292 | 0.326 | 0.111 | **0.093** | 0.047 |
+| **Media** | 0.349 | 0.317 | 0.110 | **0.061** | 0.039 |
+
+Lo spessore del guscio scende da 0.91–1.18 m a 0.25–0.34 m, circa in
+proporzione alla cella: è soprattutto un artefatto di risoluzione (con la
+griglia grossolana PPSurf non chiude un foglio più sottile di una cella).
+Con celle fini PPSurf (strato medio) arriva al livello di Poisson, su
+flat_sand lo supera di poco; rocky resta 2× indietro, probabilmente per
+dettagli più fini della spaziatura dell'input (0.5 m), non verificato.
+
+**Il costo è l'ostacolo.** Il tempo è fissato dalla griglia (129³ ≈ 2.1M
+punti valutati dalla rete), non dall'input: 150–220 s per un crop di
+625 m² con ~5k punti, quanto per il terreno intero. Coprire 100 m a questa
+qualità sono 16 crop, ~45–60 min sulla GTX 1650, contro ~10 s di Poisson.
+Strade possibili: GPU più grande (griglia 257 = default del paper, celle
+~0.4 m, 8× i punti; oppure ~513 per celle da 0.2 m, 64×), oppure valutare
+la rete solo in una fascia attorno ai punti invece che su tutto il cubo
+(il fondale occupa pochi metri in quota; richiede di modificare PPSurf).
+Il fine-tuning per togliere il guscio è invece meno prioritario di quanto
+sembrava.
 
 ## Prossimi passi
 

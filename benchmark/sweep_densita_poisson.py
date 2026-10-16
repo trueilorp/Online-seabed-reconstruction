@@ -82,7 +82,7 @@ def main():
 
 	df = pd.DataFrame(righe)
 	os.makedirs(os.path.dirname(FILE_OUTPUT), exist_ok=True)
-	df.to_csv(FILE_OUTPUT, index=False)
+	df.to_csv(FILE_OUTPUT, index=False, float_format="%.3f")
 	print(f"\nRisultati per terreno e quantile in {FILE_OUTPUT}")
 
 	pd.set_option("display.width", 200)

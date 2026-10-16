@@ -122,7 +122,7 @@ def salva_csv(righe: list, cartella_out: str, precedenti_terreno: pd.DataFrame,
 			  precedenti_famiglia: pd.DataFrame):
 	"""Righe di questa esecuzione in coda a quelle precedenti; le medie per famiglia sono per singola run."""
 	df = pd.DataFrame(righe)
-	_accoda(precedenti_terreno, df).to_csv(os.path.join(cartella_out, CSV_TERRENO), index=False)
+	_accoda(precedenti_terreno, df).to_csv(os.path.join(cartella_out, CSV_TERRENO), index=False, float_format="%.3f")
 
 	ok = df[df["errore"].isna()] if "errore" in df else df
 	if ok.empty:
@@ -133,7 +133,7 @@ def salva_csv(righe: list, cartella_out: str, precedenti_terreno: pd.DataFrame,
 	per_famiglia = ok.groupby(gruppi)[colonne].mean()
 	per_famiglia.insert(0, "n_terreni", ok.groupby(gruppi).size())
 	_accoda(precedenti_famiglia, per_famiglia.reset_index()).to_csv(
-		os.path.join(cartella_out, CSV_FAMIGLIA), index=False)
+		os.path.join(cartella_out, CSV_FAMIGLIA), index=False, float_format="%.3f")
 
 
 def main():

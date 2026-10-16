@@ -277,6 +277,8 @@ def salva_metriche_csv(metriche: dict, percorso_csv: str = "../output/metriche_r
 	riga["escludi_classi"] = str(escludi_classi)
 	riga.update(parametri or {})
 
+	# 3 cifre decimali: arrotondato qui perche' nel ramo concat le colonne sono object e float_format non si applica
+	riga = {k: round(v, 3) if isinstance(v, float) else v for k, v in riga.items()}
 	df_riga = pd.DataFrame([riga])
 	if os.path.isfile(percorso_csv):
 		# letto come testo: le righe vecchie vengono riscritte identiche (niente 234231 -> 234231.0)

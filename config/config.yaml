@@ -41,7 +41,7 @@ sliding_window:
 poisson:
   profondita: 9                      # risoluzione octree Poisson (8-10 tipico)
   rimuovi_bassa_densita: 0.05        # percentile di vertici a bassa densità da rimuovere
-  dimensione_min_componente: 100     # pulizia mesh: componenti connesse più piccole vengono rimosse
+  dimensione_min_componente: 0       # pulizia mesh: componenti connesse più piccole vengono rimosse; con rimuovi_bassa_densita: 0.05 non cambia averlo a 0 o 100
 
 ppsurf:
   max_punti: 250000                  # rete di sicurezza per dataset molto grandi (soglia consigliata dal README)
