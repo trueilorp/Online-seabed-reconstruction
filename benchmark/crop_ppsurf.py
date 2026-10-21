@@ -14,6 +14,9 @@ del crop) si misurano contro il fondale della GT, con la stessa funzione di eval
 "medio" = punto medio tra i due strati del guscio doppio (come strato_singolo_ppsurf.py).
 
 Se crop_medio scende verso Poisson il limite e' la griglia; se resta ~ completo_medio e' il modello.
+NOTA: crop_medio scende, ma il crop riduce insieme cella ed estensione della scena; con la
+griglia a 519 sull'intero terreno (stessa cella) il guscio resta ~0.9 m: conta l'estensione
+(vedi README e tile_ppsurf.py).
 
 Richiede le mesh di evaluate.py (<id>_ppsurf.ply, <id>_poisson.ply) e lancia UNA run PPSurf
 (GPU, qualche minuto) tramite scripts/ppsurf.py, con i parametri della sezione ppsurf del config.

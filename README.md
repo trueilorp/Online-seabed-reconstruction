@@ -17,6 +17,7 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 │   ├── sweep_densita_poisson.py         # sweep di poisson.rimuovi_bassa_densita sui terreni sintetici (F-score/Chamfer)
 │   ├── strato_singolo_ppsurf.py         # PPSurf: guscio doppio -> strato alto/basso/medio, metriche vs Poisson
 │   ├── crop_ppsurf.py                   # PPSurf su un crop di 25 m: griglia di marching cubes vs modello
+│   ├── tile_ppsurf.py                   # PPSurf a porzioni (quadrati da 25 m) + strato medio sull'intero terreno
 │   └── comune.sh, prepara_input.py, ... # funzioni condivise; risultati in output/benchmark/
 ├── config/
 │   └── config.yaml                      # percorsi + parametri condivisi e specifici per algoritmo
@@ -349,7 +350,7 @@ fatto *offline*, con il fine-tuning supervisionato sui terreni sintetici;
 in ricostruzione resta un solo passaggio in avanti della rete
 (`generate.py`), da confrontare con Poisson sullo stesso budget per finestra.
 
-### PPSurf: il limite è la griglia, non il modello
+### PPSurf: il guscio doppio scala con la scena, non con la griglia
 
 Sui terreni sintetici PPSurf restava ~7× peggio di Poisson (Chamfer ~0.34 m
 vs ~0.05 m), con il guscio doppio di ~1 m descritto sopra. Due prove per
@@ -375,7 +376,7 @@ punto medio su una griglia XZ di 0.25 m), media sui 6 terreni `*_012`:
 Il guscio non è simmetrico (lo strato basso è sempre più vicino al fondale
 vero), e anche il punto medio resta >5× Poisson.
 
-**La griglia di marching cubes sì.** `gen_resolution_global: 129` (ridotto
+**Il crop sì.** `gen_resolution_global: 129` (ridotto
 dal default 257 per i 4 GB) copre tutta la scena: su 100 m sono celle di
 ~0.8 m, contro ~0.21 m di Poisson a depth 9. `benchmark/crop_ppsurf.py`
 rilancia PPSurf su un crop di 25×25 m (stessa griglia 129 → celle ~0.2 m,
@@ -389,23 +390,72 @@ stesso input) e misura tutte le varianti sul quadrato interno di 20 m
 | rocky_012 | 0.292 | 0.326 | 0.111 | **0.093** | 0.047 |
 | **Media** | 0.349 | 0.317 | 0.110 | **0.061** | 0.039 |
 
-Lo spessore del guscio scende da 0.91–1.18 m a 0.25–0.34 m, circa in
-proporzione alla cella: è soprattutto un artefatto di risoluzione (con la
-griglia grossolana PPSurf non chiude un foglio più sottile di una cella).
-Con celle fini PPSurf (strato medio) arriva al livello di Poisson, su
-flat_sand lo supera di poco; rocky resta 2× indietro, probabilmente per
-dettagli più fini della spaziatura dell'input (0.5 m), non verificato.
+Lo spessore del guscio scende da 0.91–1.18 m a 0.25–0.34 m e con lo strato
+medio PPSurf arriva al livello di Poisson (su flat_sand lo supera di poco;
+rocky resta 2× indietro, probabilmente per dettagli più fini della
+spaziatura dell'input, 0.5 m, non verificato). In un primo momento questo è
+stato letto come artefatto di risoluzione della griglia; il test seguente
+mostra invece che conta l'estensione della scena.
 
-**Il costo è l'ostacolo.** Il tempo è fissato dalla griglia (129³ ≈ 2.1M
-punti valutati dalla rete), non dall'input: 150–220 s per un crop di
-625 m² con ~5k punti, quanto per il terreno intero. Coprire 100 m a questa
-qualità sono 16 crop, ~45–60 min sulla GTX 1650, contro ~10 s di Poisson.
-Strade possibili: GPU più grande (griglia 257 = default del paper, celle
-~0.4 m, 8× i punti; oppure ~513 per celle da 0.2 m, 64×), oppure valutare
-la rete solo in una fascia attorno ai punti invece che su tutto il cubo
-(il fondale occupa pochi metri in quota; richiede di modificare PPSurf).
-Il fine-tuning per togliere il guscio è invece meno prioritario di quanto
-sembrava.
+**Alzare la griglia sull'intero terreno non serve.** Sulla GTX TITAN X
+(12 GB) la griglia si può alzare senza crop. Split val, 1 terreno per
+famiglia (`*_007`), medie sui 6 terreni:
+
+| `gen_resolution_global` | Cella (100 m) | Chamfer | Precisione | F-score | Tempo/terreno |
+|---|---|---|---|---|---|
+| 129 | ~0.8 m | 0.360 m | 0.65 | 0.779 | ~46 s |
+| 257 (default del paper) | ~0.4 m | 0.363 m | 0.65 | 0.782 | ~187 s |
+| 519 | ~0.2 m | 0.354 m | 0.65 | 0.786 | ~918 s |
+
+Risoluzione ×4, tempo ×20, nessun miglioramento: le differenze sono nel
+rumore (la stessa run ripetuta varia di ~0.015 m). `strato_singolo_ppsurf.py`
+sulle mesh a 519: spessore del guscio 0.79–0.94 m (contro 0.91–1.18 m a
+129), strato medio 0.255 m, Poisson 0.044 m. Con la stessa cella (~0.2 m)
+il crop di 25 m aveva un guscio di 0.25–0.34 m: **lo spessore è ~1% del
+lato della scena** (100 m → ~0.9 m, 25 m → ~0.3 m), qualunque sia la
+griglia. È coerente con la normalizzazione di PPSurf, che porta ogni point
+cloud nel cubo unitario: il guscio ha uno spessore fisso in coordinate
+normalizzate. Nell'esperimento sul crop scena e cella si riducevano insieme;
+il test a 519 separa i due effetti. Il guscio è nel campo predetto dalla
+rete (pre-addestrata su oggetti chiusi), non nella discretizzazione.
+
+**PPSurf a porzioni.** `benchmark/tile_ppsurf.py` divide il terreno in
+quadrati XZ da 25 m (nucleo di 20 m + 2.5 m di margine per lato, scartato
+nell'unione), li ricostruisce tutti in un solo sottoprocesso PPSurf
+(modalità dataset di `pps.py`, modello caricato una volta; in questa
+modalità PPSurf si aspetta input già normalizzati e non riporta le mesh in
+metri, la normalizzazione e la sua inversa sono nello script) e li riunisce:
+`tile_originale` = mesh dei quadrati ritagliate sui nuclei, `tile_medio` =
+strato medio su una griglia XZ globale. Griglia 129 per quadrato (celle
+~0.2 m), 25 quadrati per terreno, `*_012`, TITAN X:
+
+| Variante | Chamfer | Precisione | Richiamo | F-score | Spessore guscio |
+|---|---|---|---|---|---|
+| PPSurf completo (tabella dello strato singolo sopra) | 0.344 m | 0.67 | 0.96 | 0.79 | ~1.0 m |
+| PPSurf completo, strato medio | 0.262 m | 0.91 | 0.86 | 0.88 | ~1.0 m |
+| **tile_originale** | **0.121 m** | 0.98 | 0.99 | **0.99** | 0.28 m |
+| **tile_medio** | **0.086 m** | 0.99 | 0.99 | **0.99** | 0.28 m |
+| Poisson | 0.048 m | 1.00 | 1.00 | 1.00 | – |
+
+(Le righe del PPSurf completo e di Poisson vengono dalla tabella dello
+strato singolo sopra: stessi terreni `*_012`, ma un'altra run, sulla GTX 1650.)
+
+Lo spessore del guscio è 0.25–0.34 m su tutte le famiglie. Con τ = 0.5 m
+PPSurf a porzioni è alla pari con Poisson (F-score 0.99); lo scarto di
+Chamfer che resta (~1.8×) è tutto sotto la soglia. Lo strato medio aggiunge
+poco (0.121 → 0.086 m): `tile_originale` è già buono e conserva la
+geometria 3D (tubi, piloni), che lo strato medio, essendo 2.5D, cancella.
+
+**Il costo resta l'ostacolo.** ~17 min per terreno (~41 s per quadrato,
+fissato dalla griglia e non dal numero di punti) contro ~7 s di Poisson,
+circa 150×. Quadrati più piccoli assottiglierebbero ancora il guscio ma
+moltiplicano il numero di quadrati; la griglia per quadrato non si può
+abbassare, perché le celle (0.2 m) devono restare più fini del guscio
+(~0.3 m). Strade possibili: valutare la rete solo in una fascia attorno ai
+punti invece che su tutto il cubo (richiede di modificare PPSurf), oppure il
+fine-tuning su superfici aperte, che attacca la causa del guscio e va
+valutato soprattutto sulle strutture (tubi, piloni), dove un metodo neurale
+potrebbe superare Poisson.
 
 ## Prossimi passi
 
