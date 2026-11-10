@@ -5,7 +5,7 @@
 #   ripetizioni  quante volte ripetere il metodo (default 1); la prima run puo'
 #                includere costi una tantum (download pesi, cache CUDA), le successive no
 #
-# Ogni fase cronometrata viene stampata e aggiunta a output/benchmark/tempi.csv:
+# Ogni fase cronometrata viene stampata e aggiunta a benchmark/benchmark_output/tempi.csv:
 #   data,metodo,dataset,n_punti,ripetizione,fase,secondi,ram_picco_mb,vram_picco_mb,chamfer,precisione,richiamo,fscore,tau
 # (vram_picco_mb = picco di memoria GPU usata durante la fase, al netto di quella gia' occupata prima)
 # Le metriche di superficie (benchmark/metriche_superficie.py, contro il fondale della ground truth)
@@ -21,8 +21,8 @@ RIPETIZIONI="${2:-1}"
 
 CONDA_BASE="$(conda info --base)"
 # percorso assoluto: le fasi dei metodi neurali girano dentro la cartella del loro repo
-FILE_TEMPI="$RADICE/output/benchmark/tempi.csv"
-mkdir -p "$RADICE/output/benchmark"
+FILE_TEMPI="$RADICE/benchmark/benchmark_output/tempi.csv"
+mkdir -p "$RADICE/benchmark/benchmark_output"
 INTESTAZIONE="data,metodo,dataset,n_punti,ripetizione,fase,secondi,ram_picco_mb,vram_picco_mb,chamfer,precisione,richiamo,fscore,tau"
 # un file vuoto viene semplicemente riscritto con l'intestazione, senza rinominarlo
 [[ -s "$FILE_TEMPI" ]] || rm -f "$FILE_TEMPI"
@@ -51,7 +51,7 @@ fi
 # prepara_input <metodo>: preprocessing comune (fuori dal cronometro del metodo) e caricamento parametri
 prepara_input() {
 	local metodo=$1
-	DIR_LAVORO="$RADICE/output/benchmark/$metodo/$DATASET"
+	DIR_LAVORO="$RADICE/benchmark/benchmark_output/$metodo/$DATASET"
 	rm -rf "$DIR_LAVORO"
 	local args=(--metodo "$metodo" --out_dir "$DIR_LAVORO")
 	[[ -n "$CSV_INPUT" ]] && args+=(--csv "$CSV_INPUT")

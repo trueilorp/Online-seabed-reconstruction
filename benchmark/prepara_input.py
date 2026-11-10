@@ -9,7 +9,7 @@ cosi' gli script .sh possono cronometrare i comandi dei metodi isolati dal resto
 La sliding window viene ignorata: si misura la ricostruzione sull'intera point cloud.
 
 Uso (dalla root del progetto, ambiente "ricostruzione3d"):
-	python benchmark/prepara_input.py --metodo ppsurf --out_dir output/benchmark/ppsurf/<dataset> [--csv file.csv]
+	python benchmark/prepara_input.py --metodo ppsurf --out_dir benchmark/benchmark_output/ppsurf/<dataset> [--csv file.csv]
 """
 
 import argparse

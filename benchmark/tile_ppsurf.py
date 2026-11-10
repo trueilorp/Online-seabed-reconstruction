@@ -26,8 +26,8 @@ Unione e varianti misurate contro il fondale della GT (stessa funzione di evalua
 Lo strato medio e' 2.5D: va bene per il fondale, ma cancella sporgenze e vuoti (tubi, piloni).
 
 Output:
-  output/benchmark/tile_ppsurf.csv                         in append, una riga per (run, terreno, variante)
-  output/benchmark/ppsurf_tile/<id>_tile<lato>_{originale,medio}.ply
+  benchmark/benchmark_output/tile_ppsurf.csv                         in append, una riga per (run, terreno, variante)
+  benchmark/benchmark_output/ppsurf_tile/<id>_tile<lato>_{originale,medio}.ply
 
 Uso (dalla root del progetto, ambiente "ricostruzione3d"; parametri PPSurf dalla sezione ppsurf del config):
 	python benchmark/tile_ppsurf.py                              # split da config, 1 terreno per famiglia, quadrati da 25 m
@@ -55,9 +55,9 @@ from scripts.ppsurf import trova_python_ambiente_conda
 from utils.mesh import top_surface
 from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
 
-FILE_OUTPUT = "output/benchmark/tile_ppsurf.csv"
-CARTELLA_MESH = "output/benchmark/ppsurf_tile"
-WORK_DIR = "output/benchmark/ppsurf_tile_tmp"
+FILE_OUTPUT = "benchmark/benchmark_output/tile_ppsurf.csv"
+CARTELLA_MESH = "benchmark/benchmark_output/ppsurf_tile"
+WORK_DIR = "benchmark/benchmark_output/ppsurf_tile_tmp"
 
 
 def box_xz(x0: float, x1: float, z0: float, z1: float) -> o3d.geometry.AxisAlignedBoundingBox:

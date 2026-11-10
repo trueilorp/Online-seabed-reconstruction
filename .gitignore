@@ -5,3 +5,4 @@ neural_methods/
 data/
 SA-ConvONet/
 meshes_pc_verona/
+benchmark/benchmark_output/

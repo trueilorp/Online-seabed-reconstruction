@@ -1,9 +1,15 @@
+import os
+
+# su WSLg GLFW sceglie Wayland: la finestra non compare o GLEW non si inizializza -> forza X11
+os.environ.pop("WAYLAND_DISPLAY", None)
+os.environ["XDG_SESSION_TYPE"] = "x11"
+
 import open3d as o3d
 
 # --- Imposta qui il file da aprire ---
-PERCORSO_MESH = "rocky_012_tile25_originale.ply" # "output/mesh/Terrain_unity/mesh_ppsurf.ply"
+PERCORSO_MESH = "new_mesh_ppsurf_sw/rocky_012_ppsurf_sw.ply" # "output/mesh/Terrain_unity/mesh_ppsurf.ply"
 MOSTRA_WIREFRAME = False   # True per vedere anche gli spigoli dei triangoli sovrapposti
-CARTELLA_SCREENSHOT = "output/screenshot_mesh"   # cartella dove salvare le immagini (creata se non esiste)
+CARTELLA_SCREENSHOT = "output/screenshots_mesh"   # cartella dove salvare le immagini (creata se non esiste)
 
 
 def visualizza(percorso: str, wireframe: bool = False):
@@ -37,7 +43,23 @@ def visualizza(percorso: str, wireframe: bool = False):
 		vis.add_geometry(linee)
 
 	render_opt = vis.get_render_option()
+	if render_opt is None:
+		print("[ERRORE] Contesto OpenGL non inizializzato (GLEW).")
+		vis.destroy_window()
+		return
 	render_opt.mesh_show_back_face = True
+
+	# vista obliqua dall'alto: l'asse "su" è quello con estensione minima della bbox
+	# (i terreni sono quasi piatti; con la vista di default si vedrebbero di taglio)
+	import numpy as np
+	asse_su = int(np.argmin(mesh.get_axis_aligned_bounding_box().get_extent()))
+	su = np.zeros(3); su[asse_su] = 1.0
+	orizzontale = np.zeros(3); orizzontale[(asse_su + 1) % 3] = 1.0
+	ctr = vis.get_view_control()
+	ctr.set_lookat(mesh.get_center())
+	ctr.set_up(su)
+	ctr.set_front(su + orizzontale)
+	ctr.set_zoom(0.6)
 	render_opt.mesh_color_option = o3d.visualization.MeshColorOption.Color  # forza l'uso dei colori vertice
 
 	def salva_screenshot(vis):

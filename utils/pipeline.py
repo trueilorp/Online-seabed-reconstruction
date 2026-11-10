@@ -108,6 +108,8 @@ def esegui_poisson(pcd: o3d.geometry.PointCloud, config: dict):
 	tempo_calcolo = time.time() - inizio
 
 	mesh = pulisci_mesh(mesh, dimensione_min_componente=p["dimensione_min_componente"])
+	# Poisson interpola i colori della point cloud (intensita'/altezza): mesh salvate senza colore
+	mesh.vertex_colors = o3d.utility.Vector3dVector()
 	mesh.compute_vertex_normals()
 	return mesh, pcd, tempo_calcolo, "poisson"
 

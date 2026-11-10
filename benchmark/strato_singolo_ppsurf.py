@@ -19,8 +19,8 @@ occupancy "sotto il fondale" ha buone probabilita'; se resta alto, il limite e' 
 Lavora sulle mesh gia' salvate da evaluate.py (non rilancia PPSurf, niente GPU) e non le modifica.
 
 Output:
-  output/benchmark/strato_singolo_ppsurf.csv              una riga per (terreno, variante)
-  output/benchmark/ppsurf_strato_singolo/<id>_{alto,basso,medio}.ply
+  benchmark/benchmark_output/strato_singolo_ppsurf.csv              una riga per (terreno, variante)
+  benchmark/benchmark_output/ppsurf_strato_singolo/<id>_{alto,basso,medio}.ply
 
 Uso (dalla root del progetto, ambiente "ricostruzione3d"):
 	python benchmark/strato_singolo_ppsurf.py                    # split da config, 1 terreno per famiglia
@@ -41,8 +41,8 @@ from evaluate import distanze_da_mesh, metriche_superficie, elenca_terreni, fami
 from utils.mesh import top_surface
 from utils.pipeline import load_config
 
-FILE_OUTPUT = "output/benchmark/strato_singolo_ppsurf.csv"
-CARTELLA_MESH = "output/benchmark/ppsurf_strato_singolo"
+FILE_OUTPUT = "benchmark/benchmark_output/strato_singolo_ppsurf.csv"
+CARTELLA_MESH = "benchmark/benchmark_output/ppsurf_strato_singolo"
 
 
 def primo_hit_verticale(mesh: o3d.geometry.TriangleMesh, X: np.ndarray, Z: np.ndarray,

@@ -18,7 +18,7 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 │   ├── strato_singolo_ppsurf.py         # PPSurf: guscio doppio -> strato alto/basso/medio, metriche vs Poisson
 │   ├── crop_ppsurf.py                   # PPSurf su un crop di 25 m: griglia di marching cubes vs modello
 │   ├── tile_ppsurf.py                   # PPSurf a porzioni (quadrati da 25 m) + strato medio sull'intero terreno
-│   └── comune.sh, prepara_input.py, ... # funzioni condivise; risultati in output/benchmark/
+│   └── comune.sh, prepara_input.py, ... # funzioni condivise; risultati in benchmark/benchmark_output/
 ├── config/
 │   └── config.yaml                      # percorsi + parametri condivisi e specifici per algoritmo
 ├── data/
@@ -42,7 +42,7 @@ un'azienda bellunese che produce robot subacquei. Supervisione: Daniele.
 ├── output/
 │   ├── mesh/                            # mesh .ply generate dalle pipeline
 │   ├── comparison/<dataset>/            # heatmap, profili di sezione, istogrammi, tabelle accuratezza/completezza
-│   ├── screenshot_mesh/                 # screenshot presi con visualize_mesh.py
+│   ├── screenshots_mesh/                # screenshot presi con visualize_mesh.py
 │   └── metriche_ricostruzione.csv       # log di tutte le metriche, un run per riga
 ├── helpers/                             # repository di terzi clonati (Point2Mesh, Manifold, PPSurf - non tracciati in git)
 ├── neural_methods/                      # repository neurali piu' recenti (SA-ConvONet, if-net - non tracciati in git)

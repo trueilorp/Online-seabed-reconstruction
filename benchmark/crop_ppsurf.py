@@ -22,8 +22,8 @@ Richiede le mesh di evaluate.py (<id>_ppsurf.ply, <id>_poisson.ply) e lancia UNA
 (GPU, qualche minuto) tramite scripts/ppsurf.py, con i parametri della sezione ppsurf del config.
 
 Output:
-  output/benchmark/crop_ppsurf.csv
-  output/benchmark/ppsurf_crop/<id>_crop<lato>_{originale,medio}.ply
+  benchmark/benchmark_output/crop_ppsurf.csv
+  benchmark/benchmark_output/ppsurf_crop/<id>_crop<lato>_{originale,medio}.ply
 
 Uso (dalla root del progetto, ambiente "ricostruzione3d"):
 	python benchmark/crop_ppsurf.py                              # ridges_012, crop 25 m al centro
@@ -45,9 +45,9 @@ from scripts.ppsurf import ricostruisci_ppsurf
 from utils.mesh import top_surface
 from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
 
-FILE_OUTPUT = "output/benchmark/crop_ppsurf.csv"
-CARTELLA_MESH = "output/benchmark/ppsurf_crop"
-WORK_DIR = "output/benchmark/ppsurf_crop_tmp"
+FILE_OUTPUT = "benchmark/benchmark_output/crop_ppsurf.csv"
+CARTELLA_MESH = "benchmark/benchmark_output/ppsurf_crop"
+WORK_DIR = "benchmark/benchmark_output/ppsurf_crop_tmp"
 
 
 def quadrato(centro, lato: float) -> o3d.geometry.AxisAlignedBoundingBox:

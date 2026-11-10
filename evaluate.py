@@ -20,12 +20,16 @@ di config/config.yaml; split, limit, metodi e tau sovrascrivibili da riga di com
 
 Output in <evaluation.output_dir>/<split>/:
   meshes/<id>_<metodo>[_sw].ply, metriche_per_terreno.csv, metriche_per_famiglia.csv
-I due CSV si accumulano tra esecuzioni (colonna "run" = istante di avvio); le mesh
+  distanze/<id>_<metodo>[_sw]_{rec2gt,gt2rec}.npy  distanze grezze (float32, n_campioni ciascuno):
+    rec2gt = punti della ricostruzione -> fondale, gt2rec = punti del fondale -> ricostruzione;
+    precisione/richiamo/F-score/Chamfer per qualsiasi tau si ricalcolano da qui.
+I due CSV si accumulano tra esecuzioni (colonna "run" = istante di avvio); mesh e distanze
 invece vengono sovrascritte dall'ultima esecuzione.
-Con sliding_window.abilitato in config la ricostruzione avviene a finestre di ping (suffisso _sw).
+Con sliding_window.abilitato in config (o --sliding_window on) la ricostruzione avviene a finestre di ping (suffisso _sw).
 
 Uso:
 	python evaluate.py --split val --limit 2 --methods poisson ppsurf   # 2 terreni per famiglia
+	python evaluate.py --split test+val --limit 0 --methods poisson ppsurf --sliding_window on
 """
 
 import argparse
@@ -62,14 +66,15 @@ def metriche_superficie(d_rec: np.ndarray, d_fondale: np.ndarray, tau: float) ->
 
 
 def calcola_metriche(mesh: o3d.geometry.TriangleMesh, gt_mesh: o3d.geometry.TriangleMesh,
-					 fondale: o3d.geometry.TriangleMesh, tau: float, n_campioni: int) -> dict:
+					 fondale: o3d.geometry.TriangleMesh, tau: float, n_campioni: int):
+	"""Metriche aggregate + distanze grezze {"rec2gt": ricostruzione->fondale, "gt2rec": fondale->ricostruzione}."""
 	punti_mesh = np.asarray(mesh.sample_points_uniformly(n_campioni).points)
 	punti_fondale = np.asarray(fondale.sample_points_uniformly(n_campioni).points)
 
 	acc = distanze_da_mesh(punti_mesh, gt_mesh)
 	comp = distanze_da_mesh(punti_fondale, mesh)
 	acc_fondale = distanze_da_mesh(punti_mesh, fondale)
-	return {
+	metriche = {
 		"accuratezza_media": float(acc.mean()),
 		"accuratezza_p90": float(np.percentile(acc, 90)),
 		"completezza_media": float(comp.mean()),
@@ -77,6 +82,7 @@ def calcola_metriche(mesh: o3d.geometry.TriangleMesh, gt_mesh: o3d.geometry.Tria
 		"copertura": float((comp <= tau).mean()),
 		**metriche_superficie(acc_fondale, comp, tau),
 	}
+	return metriche, {"rec2gt": acc_fondale, "gt2rec": comp}
 
 
 def elenca_terreni(synthetic_dir: str, split: str, famiglie: dict, limit: int = None) -> list:
@@ -141,17 +147,23 @@ def main():
 	ev = config_base["evaluation"]
 
 	parser = argparse.ArgumentParser(description="Valuta i metodi di ricostruzione sui terreni sintetici.")
-	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test"])
+	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test", "test+val"])
 	parser.add_argument("--limit", type=int, default=ev["limit"], help="numero massimo di terreni per famiglia")
 	parser.add_argument("--methods", nargs="+", default=ev["metodi"], choices=list(ESECUTORI))
 	parser.add_argument("--tau", type=float, default=ev["tau"], help="soglia di copertura in metri")
+	parser.add_argument("--sliding_window", choices=["on", "off"], default=None,
+						help="sovrascrive sliding_window.abilitato del config")
 	args = parser.parse_args()
 
+	if args.sliding_window is not None:
+		config_base.setdefault("sliding_window", {})["abilitato"] = args.sliding_window == "on"
 	sliding_window = bool(config_base.get("sliding_window", {}).get("abilitato"))
 	suffisso = "_sw" if sliding_window else ""
 	cartella_out = os.path.join(ev["output_dir"], args.split)
 	cartella_mesh = os.path.join(cartella_out, "meshes")
+	cartella_distanze = os.path.join(cartella_out, "distanze")
 	os.makedirs(cartella_mesh, exist_ok=True)
+	os.makedirs(cartella_distanze, exist_ok=True)
 
 	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
 	terreni = elenca_terreni(ev["synthetic_dir"], args.split, famiglie, args.limit)
@@ -182,7 +194,12 @@ def main():
 				mesh_out = os.path.join(cartella_mesh, f"{id_terreno}_{nome}{suffisso}.ply")
 				o3d.io.write_triangle_mesh(mesh_out, mesh)
 
-				riga.update(calcola_metriche(mesh, gt_mesh, fondale, args.tau, ev["n_campioni"]))
+				metriche, distanze = calcola_metriche(mesh, gt_mesh, fondale, args.tau, ev["n_campioni"])
+				riga.update(metriche)
+				# distanze grezze: altre soglie tau ricalcolabili offline senza rifare la ricostruzione
+				for verso, d in distanze.items():
+					np.save(os.path.join(cartella_distanze, f"{id_terreno}_{nome}{suffisso}_{verso}.npy"),
+							d.astype(np.float32))
 				riga.update({"n_vertici": len(mesh.vertices), "tempo_calcolo_secondi": tempo,
 							 "mesh": mesh_out, "errore": None})
 				print("  " + ", ".join(f"{k}={v:.4f}" for k, v in riga.items() if isinstance(v, float)))

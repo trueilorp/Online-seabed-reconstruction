@@ -8,7 +8,7 @@ di evaluate.py). Serve a scegliere il quantile con l'F-score migliore e a vedere
 migliore e' stabile tra famiglie di terreni (se no: meglio una soglia adattiva).
 
 Output:
-  output/benchmark/sweep_densita_poisson.csv   una riga per (terreno, quantile)
+  benchmark/benchmark_output/sweep_densita_poisson.csv   una riga per (terreno, quantile)
   a terminale: F-score medio per quantile e quantile migliore per terreno/famiglia
 
 Uso (dalla root del progetto, ambiente "ricostruzione3d"):
@@ -34,7 +34,7 @@ from utils.mesh import stima_normali, top_surface
 from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
 
 QUANTILI_DEFAULT = [0.0, 0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.35]
-FILE_OUTPUT = "output/benchmark/sweep_densita_poisson.csv"
+FILE_OUTPUT = "benchmark/benchmark_output/sweep_densita_poisson.csv"
 
 
 def main():
