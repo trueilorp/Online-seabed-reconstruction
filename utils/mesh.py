@@ -2,15 +2,13 @@
 Funzioni condivise di ricostruzione 3D da point cloud (sonar/LiDAR)
 ====================================================================
 
-Libreria usata da main.py e dalle pipeline in scripts/ (poisson.py,
-point2mesh.py, ppsurf.py): caricamento/pulizia della point cloud, stima
-normali, valutazione e salvataggio metriche. La ricostruzione vera e
-propria (specifica per ciascun algoritmo) vive negli script in scripts/.
+Libreria usata da utils/pipeline.py: caricamento e filtri del CSV, pulizia della
+point cloud, stima delle normali e top_surface (il fondale di una ground truth
+chiusa). Le metriche sono in evaluate.py; la ricostruzione vera e propria
+(specifica per ciascun algoritmo) vive negli script in scripts/.
 
-Input:  un file CSV con colonne x,y,z (,intensity opzionale) prodotto da
-		PointCloudRecorder.cs nel simulatore Unity.
-Output: una mesh .ply/.obj ricostruita, più eventuali metriche di
-		confronto con un ground truth (se disponibile).
+Input: un CSV con colonne x,y,z (,intensity opzionale): scansioni sintetiche
+(utils/simulate_multibeam_scans.py), Unity o sonar reale.
 
 Dipendenze:
 	pip install open3d numpy pandas
@@ -20,7 +18,6 @@ import numpy as np
 import open3d as o3d
 import pandas as pd
 
-import os
 
 def carica_point_cloud(percorso_csv: str, classi_da_escludere: list = None,
 						altitude_min: float = None, altitude_max: float = None,
@@ -165,148 +162,3 @@ def top_surface(gt_mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh
 	fondale.remove_triangles_by_mask(~tieni)
 	fondale.remove_unreferenced_vertices()
 	return fondale
-
-
-# ---------------------------------------------------------------------------
-# 4. METRICHE DI VALUTAZIONE (senza bisogno di ground truth esterno)
-# ---------------------------------------------------------------------------
-
-def valuta_mesh(mesh: o3d.geometry.TriangleMesh, pcd_originale: o3d.geometry.PointCloud,
-				 tempo_calcolo: float = None, nome_metodo: str = "",
-				 max_punti_fedelta: int = 50_000,
-				 calcola_autointersezioni: bool = True) -> dict:
-
-	metriche = {"metodo": nome_metodo}
-
-	punti_originali = np.asarray(pcd_originale.points)
-	if len(punti_originali) > max_punti_fedelta:
-		indici = np.random.choice(len(punti_originali), max_punti_fedelta, replace=False)
-		punti_per_fedelta = punti_originali[indici]
-		print(f"  (fedeltà calcolata su un campione di {max_punti_fedelta} punti "
-			  f"su {len(punti_originali)} totali, per velocità)")
-	else:
-		punti_per_fedelta = punti_originali
-
-	mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
-	scene = o3d.t.geometry.RaycastingScene()
-	scene.add_triangles(mesh_t)
-
-	punti_query = o3d.core.Tensor(punti_per_fedelta, dtype=o3d.core.Dtype.Float32)
-	distanze = scene.compute_distance(punti_query).numpy()
-
-	metriche["fedelta_distanza_media"] = float(np.mean(distanze))
-	metriche["fedelta_distanza_rms"] = float(np.sqrt(np.mean(distanze ** 2)))
-	metriche["fedelta_distanza_max"] = float(np.max(distanze))
-
-	# --- Qualità intrinseca della mesh ---
-	metriche["n_vertici"] = len(mesh.vertices)
-	metriche["n_triangoli"] = len(mesh.triangles)
-	metriche["watertight"] = mesh.is_watertight()
-	metriche["edge_manifold"] = mesh.is_edge_manifold()
-	metriche["vertex_manifold"] = mesh.is_vertex_manifold()
-
-	if calcola_autointersezioni:
-		triangoli_autointersecanti = mesh.get_self_intersecting_triangles()
-		metriche["n_triangoli_autointersecanti"] = len(triangoli_autointersecanti)
-		metriche["percentuale_autointersecanti"] = (
-			100 * len(triangoli_autointersecanti) / max(len(mesh.triangles), 1)
-		)
-	else:
-		metriche["n_triangoli_autointersecanti"] = None
-		metriche["percentuale_autointersecanti"] = None
-
-	metriche["area_superficie"] = mesh.get_surface_area()
-
-	# Regolarità: area di ciascun triangolo, guardiamo dispersione (std/media = coeff. variazione)
-	vertici = np.asarray(mesh.vertices)
-	triangoli_np = np.asarray(mesh.triangles)
-	a = vertici[triangoli_np[:, 0]]
-	b = vertici[triangoli_np[:, 1]]
-	c = vertici[triangoli_np[:, 2]]
-	aree_triangoli = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
-	metriche["area_triangolo_media"] = float(np.mean(aree_triangoli))
-	metriche["coeff_variazione_aree"] = float(np.std(aree_triangoli) / (np.mean(aree_triangoli) + 1e-12))
-
-	if tempo_calcolo is not None:
-		metriche["tempo_calcolo_secondi"] = tempo_calcolo
-
-	return metriche
-
-
-def stampa_metriche(metriche: dict):
-	print(f"\n{'=' * 50}")
-	print(f"Metriche — {metriche.get('metodo', '')}")
-	print(f"{'=' * 50}")
-	print(f"Fedeltà ai dati originali (raycasting):")
-	print(f"  distanza media : {metriche['fedelta_distanza_media']:.5f} m")
-	print(f"  distanza RMS   : {metriche['fedelta_distanza_rms']:.5f} m")
-	print(f"  distanza max   : {metriche['fedelta_distanza_max']:.5f} m")
-	print(f"Qualità intrinseca:")
-	print(f"  vertici/triangoli   : {metriche['n_vertici']} / {metriche['n_triangoli']}")
-	print(f"  watertight          : {metriche['watertight']}")
-	print(f"  edge/vertex manifold: {metriche['edge_manifold']} / {metriche['vertex_manifold']}")
-	if metriche["n_triangoli_autointersecanti"] is not None:
-		print(f"  triangoli auto-intersecanti: {metriche['n_triangoli_autointersecanti']} "
-			  f"({metriche['percentuale_autointersecanti']:.2f}%)")
-	else:
-		print(f"  triangoli auto-intersecanti: (non calcolato, CALCOLA_AUTOINTERSEZIONI=False)")
-	print(f"  area superficie     : {metriche['area_superficie']:.3f}")
-	print(f"  area triangolo media: {metriche['area_triangolo_media']:.6f} "
-		  f"(coeff. variazione: {metriche['coeff_variazione_aree']:.2f})")
-	if "tempo_calcolo_secondi" in metriche:
-		print(f"  tempo di calcolo    : {metriche['tempo_calcolo_secondi']:.2f} s")
-
-
-# metriche calcolate e stampate da valuta_mesh ma non salvate nel CSV (poco utili nell'analisi)
-COLONNE_ESCLUSE_CSV = [
-	"n_triangoli", "watertight", "edge_manifold", "vertex_manifold",
-	"n_triangoli_autointersecanti", "percentuale_autointersecanti",
-	"area_triangolo_media", "coeff_variazione_aree",
-]
-
-
-def salva_metriche_csv(metriche: dict, percorso_csv: str = "../output/metriche_ricostruzione.csv",
-						input_csv: str = None, voxel_size=None, escludi_classi: list = None,
-						parametri: dict = None):
-	import datetime
-
-	riga = {k: v for k, v in metriche.items() if k not in COLONNE_ESCLUSE_CSV}
-	riga["timestamp"] = datetime.datetime.now().isoformat(timespec="seconds")
-	riga["input_csv"] = input_csv
-	riga["voxel_size"] = voxel_size if voxel_size is not None else "nessuno"  # None = downsampling disattivato
-	riga["escludi_classi"] = str(escludi_classi)
-	riga.update(parametri or {})
-
-	# 3 cifre decimali: arrotondato qui perche' nel ramo concat le colonne sono object e float_format non si applica
-	riga = {k: round(v, 3) if isinstance(v, float) else v for k, v in riga.items()}
-	df_riga = pd.DataFrame([riga])
-	if os.path.isfile(percorso_csv):
-		# letto come testo: le righe vecchie vengono riscritte identiche (niente 234231 -> 234231.0)
-		df_esistente = pd.read_csv(percorso_csv, dtype=str, keep_default_na=False)
-		if list(df_esistente.columns) == list(df_riga.columns):
-			df_riga.to_csv(percorso_csv, mode="a", header=False, index=False)
-		else:
-			# colonne diverse (es. metriche ground truth aggiunte/assenti): riscrive il file con l'unione delle colonne
-			pd.concat([df_esistente, df_riga.astype(object)], ignore_index=True).to_csv(percorso_csv, index=False)
-	else:
-		df_riga.to_csv(percorso_csv, index=False)
-	print(f"Metriche aggiunte a: {percorso_csv}")
-
-def confronta_con_ground_truth(mesh: o3d.geometry.TriangleMesh,
-								percorso_gt_mesh: str) -> dict:
-
-	gt_mesh = o3d.io.read_triangle_mesh(percorso_gt_mesh)
-	gt_pcd = gt_mesh.sample_points_uniformly(number_of_points=100_000)
-	ricostruita_pcd = mesh.sample_points_uniformly(number_of_points=100_000)
-
-	distanze = np.asarray(ricostruita_pcd.compute_point_cloud_distance(gt_pcd))
-
-	metriche = {
-		"distanza_media": float(np.mean(distanze)),
-		"distanza_rms": float(np.sqrt(np.mean(distanze ** 2))),
-		"distanza_hausdorff_approx": float(np.max(distanze)),
-	}
-	print("Metriche di confronto con ground truth:")
-	for k, v in metriche.items():
-		print(f"  {k}: {v:.4f}")
-	return metriche

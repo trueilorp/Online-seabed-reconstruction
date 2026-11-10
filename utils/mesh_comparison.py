@@ -11,7 +11,6 @@ OUTPUT_DIR = f"output/comparison/{DATASET}"  # cartella dove salvare i PNG gener
 GROUND_TRUTH_PATH = "data/sonar/Terrain_ground_truth.obj"
 METODI = {
 	"poisson": f"output/mesh/{DATASET}/mesh_poisson.ply",
-	"sa_convonet": f"output/mesh/{DATASET}/mesh_sa_convonet.ply",
 	"ppsurf": f"output/mesh/{DATASET}/mesh_ppsurf.ply",
 }
 N_PUNTI_ERRORE = 100_000       # punti campionati per la heatmap/istogramma (sia da GT che dalle mesh ricostruite)

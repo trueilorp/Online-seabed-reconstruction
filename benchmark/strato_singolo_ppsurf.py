@@ -37,7 +37,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from evaluate import distanze_da_mesh, metriche_superficie, elenca_terreni, famiglia_di, famiglie_da_manifest
+from evaluate import distanze_da_mesh, metriche_superficie, elenca_terreni, famiglia_di, famiglie_da_manifest, ultima_run
 from utils.mesh import top_surface
 from utils.pipeline import load_config
 
@@ -85,13 +85,15 @@ def main():
 	ev = config["evaluation"]
 
 	parser = argparse.ArgumentParser(description="Strato singolo dalle mesh PPSurf (guscio doppio) e metriche.")
-	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test"])
+	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test", "test+val"])
+	parser.add_argument("--run_dir", default=None,
+						help="cartella di una run di evaluate.py senza SW (default: la piu' recente dello split)")
 	parser.add_argument("--limit", type=int, default=1, help="terreni per famiglia (0 = tutti)")
 	parser.add_argument("--passo", type=float, default=0.25, help="passo della griglia XZ, m")
 	parser.add_argument("--tau", type=float, default=ev["tau"])
 	args = parser.parse_args()
 
-	cartella_mesh_eval = os.path.join(ev["output_dir"], args.split, "meshes")
+	cartella_mesh_eval = os.path.join(args.run_dir or ultima_run(ev["output_dir"], args.split, False), "meshes")
 	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
 	terreni = [t for t in elenca_terreni(ev["synthetic_dir"], args.split, famiglie, args.limit)
 			   if os.path.exists(os.path.join(cartella_mesh_eval, f"{t}_ppsurf.ply"))]

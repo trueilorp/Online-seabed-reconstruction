@@ -1,7 +1,7 @@
 # Funzioni condivise dagli script benchmark/tempo_*.sh (da includere con "source", non da eseguire).
 #
-# Argomenti degli script: [csv_input] [ripetizioni]
-#   csv_input    CSV della scansione (default: paths.input_csv di config/config.yaml)
+# Argomenti degli script: <csv_input> [ripetizioni]
+#   csv_input    CSV della scansione (<id>_scan.csv; la GT <id>_ground_truth.obj accanto, se c'e', da' le metriche)
 #   ripetizioni  quante volte ripetere il metodo (default 1); la prima run puo'
 #                includere costi una tantum (download pesi, cache CUDA), le successive no
 #
@@ -16,7 +16,7 @@ set -euo pipefail
 RADICE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$RADICE"
 
-CSV_INPUT="${1:-}"
+CSV_INPUT="${1:?Uso: bash benchmark/tempo_<metodo>.sh <csv_input> [ripetizioni]}"
 RIPETIZIONI="${2:-1}"
 
 CONDA_BASE="$(conda info --base)"
@@ -42,20 +42,14 @@ python_env() {
 
 PY_BASE="$(python_env ricostruzione3d)"
 
-if [[ -n "$CSV_INPUT" ]]; then
-	DATASET="$(basename "$CSV_INPUT" .csv)"
-else
-	DATASET="$("$PY_BASE" -c "import yaml, os; print(os.path.splitext(os.path.basename(yaml.safe_load(open('config/config.yaml'))['paths']['input_csv']))[0])")"
-fi
+DATASET="$(basename "$CSV_INPUT" .csv)"
 
 # prepara_input <metodo>: preprocessing comune (fuori dal cronometro del metodo) e caricamento parametri
 prepara_input() {
 	local metodo=$1
 	DIR_LAVORO="$RADICE/benchmark/benchmark_output/$metodo/$DATASET"
 	rm -rf "$DIR_LAVORO"
-	local args=(--metodo "$metodo" --out_dir "$DIR_LAVORO")
-	[[ -n "$CSV_INPUT" ]] && args+=(--csv "$CSV_INPUT")
-	"$PY_BASE" benchmark/prepara_input.py "${args[@]}"
+	"$PY_BASE" benchmark/prepara_input.py --metodo "$metodo" --out_dir "$DIR_LAVORO" --csv "$CSV_INPUT"
 	DIR_LAVORO="$(cd "$DIR_LAVORO" && pwd)"
 	# shellcheck disable=SC1091
 	source "$DIR_LAVORO/params.sh"
@@ -67,7 +61,6 @@ vram_usata_mb() {
 
 # metriche_superficie: "chamfer,precisione,richiamo,fscore,tau" della mesh $VALUTA_MESH (glob
 # accettato, si prende il file piu' recente) contro $GT_MESH; ",,,," se mancano mesh o GT.
-# $VALUTA_NPZ opzionale: normalizzazione da invertire (SA-ConvONet).
 metriche_superficie() {
 	local mesh
 	mesh="$(ls -t $VALUTA_MESH 2>/dev/null | head -1 || true)"
@@ -76,10 +69,8 @@ metriche_superficie() {
 		echo ",,,,"
 		return
 	fi
-	local args=("$mesh" "$GT_MESH")
-	[[ -n "${VALUTA_NPZ:-}" ]] && args+=(--npz "$VALUTA_NPZ")
 	# solo l'ultima riga: eventuali avvisi di Open3D finiscono anch'essi su stdout
-	(cd "$RADICE" && "$PY_BASE" benchmark/metriche_superficie.py "${args[@]}" | tail -1) || echo ",,,,"
+	(cd "$RADICE" && "$PY_BASE" benchmark/metriche_superficie.py "$mesh" "$GT_MESH" | tail -1) || echo ",,,,"
 }
 
 # cronometra <metodo> <ripetizione> <fase> <comando...>

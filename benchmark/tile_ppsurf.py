@@ -50,7 +50,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmark.strato_singolo_ppsurf import primo_hit_verticale, mesh_da_heightmap, misura
-from evaluate import elenca_terreni, famiglia_di, famiglie_da_manifest
+from evaluate import elenca_terreni, famiglia_di, famiglie_da_manifest, ultima_run
 from scripts.ppsurf import trova_python_ambiente_conda
 from utils.mesh import top_surface
 from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
@@ -137,7 +137,9 @@ def main():
 	pps = config_base["ppsurf"]
 
 	parser = argparse.ArgumentParser(description="PPSurf a porzioni (quadrati XZ) + strato medio.")
-	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test"])
+	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test", "test+val"])
+	parser.add_argument("--run_dir", default=None,
+						help="cartella di una run di evaluate.py senza SW (default: la piu' recente dello split)")
 	parser.add_argument("--limit", type=int, default=1, help="terreni per famiglia (0 = tutti)")
 	parser.add_argument("--id", nargs="+", default=None, help="terreni specifici (ignora --limit)")
 	parser.add_argument("--lato", type=float, default=25.0, help="lato del quadrato dato a PPSurf, m")
@@ -156,7 +158,10 @@ def main():
 
 	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
 	terreni = args.id or elenca_terreni(ev["synthetic_dir"], args.split, famiglie, args.limit)
-	cartella_mesh_eval = os.path.join(ev["output_dir"], args.split, "meshes")
+	try:  # le mesh di evaluate.py sono facoltative qui: senza, si misurano solo le varianti a porzioni
+		cartella_mesh_eval = os.path.join(args.run_dir or ultima_run(ev["output_dir"], args.split, False), "meshes")
+	except FileNotFoundError:
+		cartella_mesh_eval = ""
 	ppsurf_dir = os.path.join(config_base["paths"]["neural_methods"], "ppsurf")
 	os.makedirs(CARTELLA_MESH, exist_ok=True)
 	run = datetime.datetime.now().isoformat(timespec="seconds")

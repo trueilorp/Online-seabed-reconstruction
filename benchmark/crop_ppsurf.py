@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmark.strato_singolo_ppsurf import primo_hit_verticale, mesh_da_heightmap, misura
 from scripts.ppsurf import ricostruisci_ppsurf
 from utils.mesh import top_surface
+from evaluate import ultima_run
 from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
 
 FILE_OUTPUT = "benchmark/benchmark_output/crop_ppsurf.csv"
@@ -76,7 +77,9 @@ def main():
 
 	parser = argparse.ArgumentParser(description="PPSurf su un crop: la griglia 129 e' il limite?")
 	parser.add_argument("--id", default="ridges_012")
-	parser.add_argument("--split", default="val", choices=["train", "val", "test"])
+	parser.add_argument("--split", default="val", choices=["train", "val", "test", "test+val"])
+	parser.add_argument("--run_dir", default=None,
+						help="cartella di una run di evaluate.py senza SW (default: la piu' recente dello split)")
 	parser.add_argument("--lato", type=float, default=25.0, help="lato del crop, m")
 	parser.add_argument("--margine", type=float, default=2.5, help="bordo del crop escluso dalle metriche, m")
 	parser.add_argument("--centro", type=float, nargs=2, default=[0.0, 0.0], metavar=("X", "Z"))
@@ -85,7 +88,7 @@ def main():
 	args = parser.parse_args()
 
 	cartella = os.path.join(ev["synthetic_dir"], args.split, args.id)
-	cartella_mesh_eval = os.path.join(ev["output_dir"], args.split, "meshes")
+	cartella_mesh_eval = os.path.join(args.run_dir or ultima_run(ev["output_dir"], args.split, False), "meshes")
 	percorsi = {m: os.path.join(cartella_mesh_eval, f"{args.id}_{m}.ply") for m in ("ppsurf", "poisson")}
 	mancanti = [p for p in percorsi.values() if not os.path.exists(p)]
 	if mancanti:

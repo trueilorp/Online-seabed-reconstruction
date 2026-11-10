@@ -1,84 +1,57 @@
-algorithm: "ppsurf"  # "poisson", "point2mesh", "ppsurf", "sa_convonet"
+# Config di evaluate.py (e degli script di benchmark/).
+# Ogni terreno sintetico viene caricato, pulito (preprocessing) e ricostruito con ciascun metodo;
+# la mesh viene confrontata con la ground truth (sezione evaluation).
 
 paths:
-  input_csv: "data/sonar/Terrain_unity.csv"
-  ground_truth_mesh: "data/sonar/Terrain_ground_truth.obj"            # opzionale: mesh .obj/.ply di riferimento per il confronto
-  output_mesh_dir: "output/mesh"     # il file viene salvato come <dataset>/mesh_<algoritmo>[_sw].ply (dataset = nome del CSV di input, _sw = sliding window)
-  metriche_csv: "output/reconstruction_metrics.csv"
-  neural_methods: "neural_methods"   # root dei repo neurali piu' recenti (SA-ConvONet, ...)
+  neural_methods: "neural_methods"   # root dei repo neurali clonati (contiene ppsurf/)
 
 preprocessing:
-  escludi_classi: []                # valori di 'classification' da escludere; [] per non escludere nulla
-  altitude_min: null                 # tieni solo punti con altitude >= questo valore (null = nessun limite)
-  altitude_max: null                 # tieni solo punti con altitude <= questo valore (null = nessun limite)
-  escludi_zona_x: null               # [min, max] per escludere una zona rettangolare X (es. sosta barca)
-  escludi_zona_z: null               # [min, max] per escludere una zona rettangolare Z (es. sosta barca)
   downsampling:
     abilitato: true                  # false = nessun voxel downsampling (tutti i punti del CSV)
-    voxel_size: 0.5                  # dimensione voxel per downsampling in metri
+    voxel_size: 0.5                  # lato del voxel in metri
   rimozione_outlier:
     abilitato: true                  # false = nessun filtro statistico degli outlier
     nb_neighbors: 20                 # quanti vicini considerare per punto
     std_ratio: 2.0                   # soglia in deviazioni standard
 
-valutazione:
-  calcola_autointersezioni: false    # true = controllo completo (lento su mesh grandi)
-  max_punti_fedelta: 50000           # numero massimo di punti usati per il calcolo di fedeltà (raycasting)
+# Dopo la ricostruzione (con e senza sliding window): via i triangoli il cui baricentro dista piu' di
+# distanza_max_punti (m) dal punto piu' vicino della point cloud pulita (con la SW: della finestra).
+# Senza, Poisson chiude ogni finestra con una cupola nell'acqua (~6 m sopra il fondale, ~1/3 della mesh).
+# Deve restare > evaluation.tau, altrimenti la precisione a tau e' garantita dal ritaglio stesso.
+postprocessing:
+  distanza_max_punti: 1.0            # null = nessun ritaglio
 
-visualizza: false                    # apre una finestra 3D col risultato a fine esecuzione
-
-# Ricostruzione a finestre di ping (vale per reconstruct_single_dataset.py ed evaluate.py).
-# Il CSV viene letto a blocchi come se arrivasse dal sonar; ogni finestra viene ricostruita
-# con "algorithm" e poi scartata; le mesh delle finestre, ritagliate sulla propria zona, vengono unite.
+# Ricostruzione a finestre di ping: il CSV viene letto a blocchi come se arrivasse dal sonar,
+# ogni finestra viene ricostruita e scartata, le mesh delle finestre (ritagliate sulla propria
+# zona) vengono unite. Attivabile anche da riga di comando: evaluate.py --sliding_window on/off.
 sliding_window:
-  abilitato: false                   # false = ricostruzione sull'intera point cloud (comportamento classico)
+  abilitato: false
   ping_per_finestra: 300             # ping per finestra (sintetici: ~190 punti/ping, 300 ping ~ 50 m di rotta)
   ping_sovrapposizione: 60           # ping in comune tra finestre consecutive (divisi a meta' nel ritaglio)
   righe_per_blocco: 20000            # righe lette dal CSV per volta (simula l'arrivo dei dati)
-  punti_campione_per_finestra: 5000  # punti tenuti per finestra solo per le metriche di fedelta' finali
+  punti_campione_per_finestra: 5000  # punti tenuti per finestra (restituiti con la mesh, non usati dalle metriche)
 
-# METHODS
 poisson:
-  profondita: 9                      # risoluzione octree Poisson (8-10 tipico)
-  rimuovi_bassa_densita: 0.05        # percentile di vertici a bassa densità da rimuovere
-  dimensione_min_componente: 0       # pulizia mesh: componenti connesse più piccole vengono rimosse; con rimuovi_bassa_densita: 0.05 non cambia averlo a 0 o 100
+  profondita: 9                      # profondita' dell'octree (celle ~0.2 m su 100 m)
+  rimuovi_bassa_densita: 0.05        # quantile di vertici a bassa densita' da rimuovere (scelto con benchmark/sweep_densita_poisson.py)
+  dimensione_min_componente: 0       # componenti connesse piu' piccole vengono rimosse (con 0.05 sopra non cambia nulla)
 
 ppsurf:
-  max_punti: 250000                  # rete di sicurezza per dataset molto grandi (soglia consigliata dal README)
-  gen_resolution_global: 129         # risoluzione griglia marching cubes (default 257 va in OOM su 4GB)
-  rec_batch_size: 10000              # chunk size valutazione griglia (default 50000 va in OOM su 4GB)
-  conda_env: "pps"                   # nome dell'ambiente conda dedicato
+  max_punti: 250000                  # sottocampionamento casuale oltre questa soglia (consigliata dal README di PPSurf)
+  gen_resolution_global: 129         # griglia di marching cubes (default 257: OOM su 4 GB; su 12 GB non migliora, vedi README)
+  rec_batch_size: 10000              # punti della griglia valutati per volta (default 50000: OOM su 4 GB)
+  gen_subsample_manifold_iter: 3     # test-time augmentation: ripetizioni della parte globale su sottoinsiemi dei punti (default PPSurf 10)
+  gen_refine_iter: 3                 # raffinamento delle intersezioni di marching cubes (default PPSurf 10)
+  # 3/3 invece di 10/10: -36% di tempo (176 -> 112 s per terreno), qualita' invariata o migliore (vedi README)
+  conda_env: "pps"                   # ambiente conda di PPSurf
   work_dir: "output/ppsurf_tmp"      # file temporanei scambiati col sottoprocesso
+  timeout_s: 1200                    # oltre 20 min (normale: ~3 min) il sottoprocesso viene terminato e il terreno segnato come errore
 
-sa_convonet:
-  config_file: "configs/pointcloud_crop/sonar.yaml"  # config SA-ConvONet (relativo alla cartella del repo)
-  conda_env: "sa_conet"              # nome dell'ambiente conda dedicato
-  work_dir: "output/sa_convonet_tmp" # file temporanei scambiati col sottoprocesso
-  # Generazione a finestre scorrevoli: ogni crop copre (unit_size * query_vol_size)
-  # unita' normalizzate. Il nostro transetto sonar e' molto piu' esteso (centinaia
-  # di metri) di una stanza Matterport (10-20m, dati di riferimento del modello
-  # pre-addestrato): con i default del repo (0.002 * 25 = 0.05) risultavano
-  # ~2220 crop da processare in sequenza (2+ ore senza terminare). Questi valori
-  # (0.005 * 25 = 0.125) li portano a ~140, al costo di una mesh piu' grossolana --
-  # da affinare una volta verificato che la catena funzioni end-to-end.
-  unit_size: 0.005
-  query_vol_size: 25
-  # Adattamento online "SA" (sign-agnostic, per-scena): la rete viene riottimizzata sulla
-  # point cloud di ogni scena prima di estrarre la mesh (generate_optim_largescene.py).
-  # Molto piu' lento: online_iterazioni passi + una mesh completa ogni online_passo_lr passi.
-  # Nei CSV il metodo compare come "sa_convonet_online".
-  ottimizzazione_online: false
-  online_iterazioni: 2000            # test_optim.n_iter (default SA-ConvONet: 2000, consigliato >= 720)
-  online_passo_lr: 800               # ogni quanti passi lr *= 0.3 (e mesh intermedia); consigliato >= 300
-  online_batch_size: 1               # crop per passo (default 3, articolo 3-8): piu' alto = piu' VRAM
-##############################
-
-# usata solo da evaluate.py (benchmark sui terreni sintetici); split, limit, metodi e tau sovrascrivibili da CLI
 evaluation:
-  synthetic_dir: "data/synthetic"    # contiene <split>/<id>/{<id>_scan.csv, <id>_ground_truth.obj} e manifest.csv
-  output_dir: "output/evaluation"    # risultati in <output_dir>/<split>/ (mesh + CSV per terreno e per famiglia)
-  split: "val"                       # "val" o "test"
-  limit: 1                        # terreni per famiglia (i primi in ordine alfabetico); null = tutti quelli dello split
-  metodi: ["sa_convonet"]                # chiavi di ESECUTORI in pipeline.py, eseguite in sequenza
-  n_campioni: 100000                 # punti campionati su ciascuna superficie per accuratezza/completezza
-  tau: 0.5                           # soglia di copertura, m (pari al voxel_size del preprocessing; % del fondale vero che ha una superficie ricostruita entro 50 cm (tau = 0.5)
+  synthetic_dir: "data/synthetic"    # <split>/<id>/{<id>_scan.csv, <id>_ground_truth.obj}
+  output_dir: "output/evaluation"    # risultati in <output_dir>/<split>/ (mesh, distanze, CSV)
+  split: "test+val"                  # train, val, test, test+val (sovrascrivibile con --split)
+  limit: null                        # terreni per famiglia (i primi in ordine alfabetico); null = tutti
+  metodi: ["poisson", "ppsurf"]      # eseguiti in sequenza su ogni terreno
+  n_campioni: 100000                 # punti campionati su ciascuna superficie per le metriche
+  tau: 0.5                           # soglia di precisione/richiamo in metri (pari al voxel del preprocessing)

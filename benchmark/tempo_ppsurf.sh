@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tempi di PPSurf (inferenza col modello pre-addestrato, "pps.py rec") sulla point cloud preprocessata.
 #
-# Uso: bash benchmark/tempo_ppsurf.sh [csv_input] [ripetizioni]
+# Uso: bash benchmark/tempo_ppsurf.sh <csv_input> [ripetizioni]
 #
 # Fasi registrate:
 #   avvio_librerie  solo avvio di python + import di PyTorch Lightning / PyTorch Geometric + init CUDA:

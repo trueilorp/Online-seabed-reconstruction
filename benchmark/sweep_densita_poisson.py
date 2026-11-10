@@ -43,7 +43,7 @@ def main():
 	p = config_base["poisson"]
 
 	parser = argparse.ArgumentParser(description="Sweep di poisson.rimuovi_bassa_densita sui terreni sintetici.")
-	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test"])
+	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test", "test+val"])
 	parser.add_argument("--limit", type=int, default=ev["limit"], help="terreni per famiglia (0 = tutti)")
 	parser.add_argument("--quantili", type=float, nargs="+", default=QUANTILI_DEFAULT)
 	parser.add_argument("--tau", type=float, default=ev["tau"])

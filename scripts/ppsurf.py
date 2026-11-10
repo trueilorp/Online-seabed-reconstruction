@@ -42,6 +42,7 @@ ppsurf); l'esecuzione avviene tramite main.py nella root del progetto.
 import glob
 import json
 import os
+import signal
 import subprocess
 import time
 
@@ -101,9 +102,18 @@ def esporta_point_cloud_ppsurf(pcd: o3d.geometry.PointCloud, percorso_output_ply
 
 def ricostruisci_ppsurf(pcd: o3d.geometry.PointCloud, nome_run: str,
                          ppsurf_dir: str, conda_env: str, work_dir: str,
-                         gen_resolution_global: int = 129, rec_batch_size: int = 10000):
+                         gen_resolution_global: int = 129, rec_batch_size: int = 10000,
+                         timeout_s: float = None, gen_subsample_manifold_iter: int = None,
+                         gen_refine_iter: int = None):
     """Lancia la ricostruzione PPSurf (comando 'rec', con il modello pre-addestrato
     50NN) come sottoprocesso nell'ambiente conda 'pps'.
+
+    gen_subsample_manifold_iter: ripetizioni della parte globale della rete su sottoinsiemi dei
+        punti (test-time augmentation; default di PPSurf 10). None = default di PPSurf.
+    gen_refine_iter: iterazioni di raffinamento delle intersezioni di marching cubes
+        (default di PPSurf 10). None = default di PPSurf.
+    timeout_s: oltre questo tempo il sottoprocesso (con i suoi worker) viene terminato e si
+    solleva un errore, cosi' un PPSurf bloccato non ferma l'intera valutazione. None = nessun limite.
 
     Ritorna (mesh_o3d, tempo_calcolo_secondi).
     """
@@ -122,6 +132,10 @@ def ricostruisci_ppsurf(pcd: o3d.geometry.PointCloud, nome_run: str,
         "--model.init_args.gen_resolution_global", str(gen_resolution_global),
         "--model.init_args.rec_batch_size", str(rec_batch_size),
     ]
+    if gen_subsample_manifold_iter is not None:
+        cmd += ["--model.init_args.gen_subsample_manifold_iter", str(gen_subsample_manifold_iter)]
+    if gen_refine_iter is not None:
+        cmd += ["--model.init_args.gen_refine_iter", str(gen_refine_iter)]
 
     # IMPORTANTE: questa variabile va passata esplicitamente nell'env del
     # sottoprocesso (non basta averla esportata nel terminale interattivo,
@@ -136,8 +150,16 @@ def ricostruisci_ppsurf(pcd: o3d.geometry.PointCloud, nome_run: str,
     print(f"  {' '.join(cmd)}")
 
     inizio = time.time()
-    risultato = subprocess.run(cmd, cwd=ppsurf_dir, env=env_sottoprocesso,
-                                capture_output=True, text=True)
+    # sessione propria: in caso di timeout si termina anche i worker del dataloader di PPSurf
+    processo = subprocess.Popen(cmd, cwd=ppsurf_dir, env=env_sottoprocesso, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = processo.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        os.killpg(processo.pid, signal.SIGKILL)
+        processo.communicate()
+        raise TimeoutError(f"PPSurf non ha finito entro {timeout_s:.0f} s: sottoprocesso terminato")
+    risultato = subprocess.CompletedProcess(cmd, processo.returncode, stdout, stderr)
     tempo_calcolo = time.time() - inizio
 
     if risultato.returncode != 0:

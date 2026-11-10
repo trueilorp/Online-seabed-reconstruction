@@ -16,8 +16,7 @@ non devono contare come superficie mancante.
 Stampa su stdout una riga CSV "chamfer,precisione,richiamo,fscore,tau" (il resto su stderr).
 
 Uso (dalla root del progetto, ambiente "ricostruzione3d"):
-	python benchmark/metriche_superficie.py <mesh> <gt.obj> [--npz pointcloud.npz]
---npz: per le mesh di SA-ConvONet, in spazio normalizzato: si applica vertici * scale + loc.
+	python benchmark/metriche_superficie.py <mesh> <gt.obj>
 """
 
 import argparse
@@ -38,16 +37,12 @@ def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("mesh")
 	parser.add_argument("gt")
-	parser.add_argument("--npz", default=None)
 	args = parser.parse_args()
 
 	ev = load_config()["evaluation"]
 	tau, n_campioni = ev["tau"], ev["n_campioni"]
 
 	mesh = o3d.io.read_triangle_mesh(args.mesh)
-	if args.npz:
-		norm = np.load(args.npz)
-		mesh.vertices = o3d.utility.Vector3dVector(np.asarray(mesh.vertices) * norm["scale"] + norm["loc"])
 	fondale = top_surface(o3d.io.read_triangle_mesh(args.gt))
 
 	punti_rec = np.asarray(mesh.sample_points_uniformly(n_campioni).points)

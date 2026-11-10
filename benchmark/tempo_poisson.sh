@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tempi di Poisson (Open3D, CPU) sulla point cloud preprocessata.
 #
-# Uso: bash benchmark/tempo_poisson.sh [csv_input] [ripetizioni]
+# Uso: bash benchmark/tempo_poisson.sh <csv_input> [ripetizioni]
 #
 # Fasi registrate:
 #   processo_completo  avvio di python + import open3d + tutte le fasi sotto

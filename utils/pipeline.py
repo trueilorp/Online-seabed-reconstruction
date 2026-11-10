@@ -1,8 +1,8 @@
 """
-Pipeline di ricostruzione 3D condivisa da reconstruct_single_dataset.py ed evaluate.py.
+Pipeline di ricostruzione 3D usata da evaluate.py e dagli script di benchmark/.
 
 Contiene il caricamento della config, il preprocessing comune (caricamento CSV,
-pulizia) e gli esecutori dei singoli algoritmi, selezionabili tramite
+pulizia) e gli esecutori dei singoli algoritmi (Poisson, PPSurf), selezionabili tramite
 ESECUTORI[config["algorithm"]].
 
 Punto d'ingresso per gli script: ricostruisci(config), che esegue l'algoritmo
@@ -34,7 +34,6 @@ from scripts.ppsurf import (
 	sottocampiona_se_necessario,
 	ricostruisci_ppsurf,
 )
-from scripts.sa_convonet import ricostruisci_sa_convonet
 
 CONFIG_PATH = "config/config.yaml"
 
@@ -45,13 +44,16 @@ def load_config(percorso: str = CONFIG_PATH) -> dict:
 
 
 def filtri_da_config(config: dict) -> dict:
+	"""Filtri per i dati sonar reali (classi, quota, zone escluse). Opzionali in config:
+	sui terreni sintetici non servono e la sezione preprocessing non li contiene."""
 	pre = config["preprocessing"]
+	zona_x, zona_z = pre.get("escludi_zona_x"), pre.get("escludi_zona_z")
 	return dict(
-		classi_da_escludere=pre["escludi_classi"],
-		altitude_min=pre["altitude_min"],
-		altitude_max=pre["altitude_max"],
-		escludi_zona_x=tuple(pre["escludi_zona_x"]) if pre["escludi_zona_x"] else None,
-		escludi_zona_z=tuple(pre["escludi_zona_z"]) if pre["escludi_zona_z"] else None,
+		classi_da_escludere=pre.get("escludi_classi") or [],
+		altitude_min=pre.get("altitude_min"),
+		altitude_max=pre.get("altitude_max"),
+		escludi_zona_x=tuple(zona_x) if zona_x else None,
+		escludi_zona_z=tuple(zona_z) if zona_z else None,
 	)
 
 
@@ -84,17 +86,11 @@ def nome_run_da_config(config: dict) -> str:
 
 
 def config_per_terreno(config_base: dict, percorso_scan: str, metodo: str) -> dict:
-	"""Config per un terreno sintetico: input = <id>_scan.csv, filtri dei dati reali disattivati."""
+	"""Config per un terreno sintetico: input = <id>_scan.csv, algoritmo = metodo."""
 	config = copy.deepcopy(config_base)
 	config["paths"]["input_csv"] = percorso_scan
+	config["paths"].pop("nome_run", None)
 	config["algorithm"] = metodo
-	# i filtri del config sono pensati per i dati reali: sui sintetici non servono
-	pre = config["preprocessing"]
-	pre["escludi_classi"] = []
-	pre["altitude_min"] = None
-	pre["altitude_max"] = None
-	pre["escludi_zona_x"] = None
-	pre["escludi_zona_z"] = None
 	return config
 
 
@@ -127,75 +123,16 @@ def esegui_ppsurf(pcd: o3d.geometry.PointCloud, config: dict):
 		ppsurf_dir=ppsurf_dir, conda_env=pps["conda_env"], work_dir=pps["work_dir"],
 		gen_resolution_global=pps["gen_resolution_global"],
 		rec_batch_size=pps["rec_batch_size"],
+		timeout_s=pps.get("timeout_s"),
+		gen_subsample_manifold_iter=pps.get("gen_subsample_manifold_iter"),
+		gen_refine_iter=pps.get("gen_refine_iter"),
 	)
 	return mesh, pcd, tempo_calcolo, "ppsurf"
-
-
-def esegui_sa_convonet(pcd: o3d.geometry.PointCloud, config: dict):
-	sac = config["sa_convonet"]
-	paths = config["paths"]
-
-	nome_run = nome_run_da_config(config)
-	sa_convonet_dir = os.path.join(paths["neural_methods"], "SA-ConvONet")
-
-	mesh, tempo_calcolo = ricostruisci_sa_convonet(
-		pcd, nome_run,
-		sa_convonet_dir=sa_convonet_dir, conda_env=sac["conda_env"], work_dir=sac["work_dir"],
-		config_file=sac["config_file"],
-		unit_size=sac["unit_size"], query_vol_size=sac["query_vol_size"],
-		ottimizzazione_online=sac.get("ottimizzazione_online", False),
-		online_iterazioni=sac.get("online_iterazioni", 2000),
-		online_passo_lr=sac.get("online_passo_lr", 800),
-		online_batch_size=sac.get("online_batch_size", 3),
-	)
-	# nome distinto: mesh e righe dei CSV non si confondono con quelle senza adattamento
-	nome = "sa_convonet_online" if sac.get("ottimizzazione_online") else "sa_convonet"
-	return mesh, pcd, tempo_calcolo, nome
-
-
-# chiavi di config che non sono parametri della ricostruzione (percorsi, ambienti, logging)
-CHIAVI_NON_PARAMETRI = {"conda_env", "work_dir", "export_interval", "config_file"}
-
-
-def raccogli_parametri(config: dict) -> dict:
-	"""Parametri della run da salvare nel CSV: preprocessing, valutazione e sezione del metodo usato."""
-	def formatta(valore):
-		if valore is None:
-			return "nessuno"  # "null" in config (nessun limite/filtro); non "null", che pandas rilegge come cella vuota
-		if isinstance(valore, (list, tuple)):
-			return str(list(valore))
-		return valore
-
-	algorithm = config["algorithm"]
-	parametri = {}
-	for chiave, valore in config["preprocessing"].items():
-		if isinstance(valore, dict):
-			# sottosezioni (downsampling, rimozione_outlier): flag in pre_<sezione>, parametri
-			# con il nome piatto di prima (pre_nb_neighbors, ...) per restare confrontabili con le righe vecchie
-			parametri[f"pre_{chiave}"] = formatta(valore["abilitato"])
-			for k, v in valore.items():
-				if k not in ("abilitato", "voxel_size"):
-					parametri[f"pre_{k}"] = formatta(v)
-		# voxel_size ed escludi_classi hanno gia' colonne dedicate (presenti anche nelle righe vecchie)
-		elif chiave != "escludi_classi":
-			parametri[f"pre_{chiave}"] = formatta(valore)
-	for chiave, valore in config["valutazione"].items():
-		parametri[f"val_{chiave}"] = formatta(valore)
-	for chiave, valore in config.get(algorithm, {}).items():
-		if chiave not in CHIAVI_NON_PARAMETRI:
-			parametri[f"{algorithm}_{chiave}"] = formatta(valore)
-	# solo se attivo: con sliding window disabilitato la riga del CSV resta quella di prima
-	sw = config.get("sliding_window", {})
-	if sw.get("abilitato"):
-		for chiave, valore in sw.items():
-			parametri[f"sw_{chiave}"] = formatta(valore)
-	return parametri
 
 
 ESECUTORI = {
 	"poisson": esegui_poisson,
 	"ppsurf": esegui_ppsurf,
-	"sa_convonet": esegui_sa_convonet,
 }
 
 
@@ -260,6 +197,23 @@ def _vicini_ai_propri(query: np.ndarray, propri: o3d.geometry.PointCloud,
 	return np.asarray(q.compute_point_cloud_distance(propri)) <= np.asarray(q.compute_point_cloud_distance(altri))
 
 
+def ritaglia_lontano_dai_punti(mesh: o3d.geometry.TriangleMesh, pcd: o3d.geometry.PointCloud,
+							   distanza_max) -> o3d.geometry.TriangleMesh:
+	"""Toglie i triangoli il cui baricentro dista piu' di distanza_max dal punto piu' vicino di pcd
+	(superficie che il metodo ha inventato lontano dai dati). None = nessun ritaglio."""
+	if not distanza_max or len(mesh.triangles) == 0:
+		return mesh
+	vertici = np.asarray(mesh.vertices)
+	baricentri = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(vertici[np.asarray(mesh.triangles)].mean(axis=1)))
+	mesh.remove_triangles_by_mask(np.asarray(baricentri.compute_point_cloud_distance(pcd)) > distanza_max)
+	mesh.remove_unreferenced_vertices()
+	return mesh
+
+
+def distanza_max_da_config(config: dict):
+	return config.get("postprocessing", {}).get("distanza_max_punti")
+
+
 def _ritaglia_mesh(mesh: o3d.geometry.TriangleMesh, propri: o3d.geometry.PointCloud,
 				   altri: o3d.geometry.PointCloud) -> o3d.geometry.TriangleMesh:
 	"""Tiene solo i triangoli che ricadono nella zona propria della finestra (evita superfici doppie)."""
@@ -270,11 +224,21 @@ def _ritaglia_mesh(mesh: o3d.geometry.TriangleMesh, propri: o3d.geometry.PointCl
 	return mesh
 
 
-def ricostruisci_a_finestre(config: dict):
+def ricostruisci_a_finestre(config: dict, statistiche_finestre: list = None):
 	"""
 	Ricostruzione sliding window: ogni finestra di ping viene filtrata, pulita, ricostruita
 	con l'algoritmo scelto e ritagliata sulla propria zona; le parti vengono concatenate.
-	Della point cloud resta solo un piccolo campione per finestra, usato per le metriche.
+	Della point cloud resta solo un piccolo campione per finestra.
+
+	Se statistiche_finestre e' una lista, ci aggiunge un dict per finestra con:
+	  latenza_s          da quando la finestra e' completa a quando la sua mesh e' unita al resto
+	                     (filtri, pulizia, ricostruzione con avvio del metodo, ritaglio)
+	  tempo_metodo_s     solo la ricostruzione, come misurata dall'esecutore
+	  acquisizione_s     durata della finestra: dal primo all'ultimo ping (colonna elapsed_s)
+	  budget_s           tempo tra il completamento della finestra precedente e di questa, cioe'
+	                     quanto si ha per elaborarla prima che arrivi la successiva (per la prima
+	                     finestra = acquisizione_s)
+	  rtf                real-time factor = latenza_s / budget_s: < 1 tiene il passo col sonar
 	"""
 	sw = config["sliding_window"]
 	metodo = config["algorithm"]
@@ -285,14 +249,34 @@ def ricostruisci_a_finestre(config: dict):
 
 	mesh_totale = o3d.geometry.TriangleMesh()
 	campioni, tempo_totale, nome_metodo = [], 0.0, metodo
+	t_fine_precedente = None
 	finestre = finestre_di_ping(config["paths"]["input_csv"], sw["ping_per_finestra"],
 								sw["ping_sovrapposizione"], sw["righe_per_blocco"])
 	for k, (df, ping_propri, col_ping) in enumerate(finestre, 1):
+		inizio = time.perf_counter()
 		print(f"\n--- Finestra {k}: ping {df[col_ping].iloc[0]}-{df[col_ping].iloc[-1]}, {len(df)} punti ---")
+		colonne_lower = {c.lower(): c for c in df.columns}
+		col_t = colonne_lower.get("elapsed_s")
+		t_inizio = float(df[col_t].min()) if col_t else None
+		t_fine = float(df[col_t].max()) if col_t else None
+		stat = {"finestra": k, "ping_inizio": int(df[col_ping].iloc[0]), "ping_fine": int(df[col_ping].iloc[-1]),
+				"n_punti": len(df), "n_punti_puliti": None, "tempo_metodo_s": None, "esito": "ok"}
+
+		def registra(esito: str = "ok"):
+			if statistiche_finestre is None:
+				return
+			latenza = time.perf_counter() - inizio
+			acquisizione = t_fine - t_inizio if col_t else None
+			budget = (t_fine - (t_fine_precedente if t_fine_precedente is not None else t_inizio)) if col_t else None
+			statistiche_finestre.append({**stat, "esito": esito, "latenza_s": latenza, "acquisizione_s": acquisizione,
+										 "budget_s": budget, "rtf": latenza / budget if budget else None})
+
 		colonne = colonne_point_cloud(df)
 		df = filtra_dataframe(df, colonne, **filtri)
 		if df.empty:
 			print("  finestra vuota dopo i filtri: saltata")
+			registra("vuota")
+			t_fine_precedente = t_fine
 			continue
 		pcd = dataframe_a_point_cloud(df, colonne)
 		propri = df[col_ping].isin(ping_propri).to_numpy()
@@ -303,14 +287,22 @@ def ricostruisci_a_finestre(config: dict):
 			pcd_propri, pcd_altri = pcd_propri.voxel_down_sample(voxel), pcd_altri.voxel_down_sample(voxel)
 
 		pcd = pulisci_da_config(pcd, config)
+		stat["n_punti_puliti"] = len(pcd.points)
 		if len(pcd.points) < MIN_PUNTI_FINESTRA:
 			print(f"  solo {len(pcd.points)} punti dopo la pulizia: finestra saltata")
+			registra("pochi_punti")
+			t_fine_precedente = t_fine
 			continue
 
 		config_finestra = {**config, "paths": {**config["paths"], "nome_run": f"{nome_base}_w{k:03d}"}}
 		mesh, pcd_usata, tempo, nome_metodo = ESECUTORI[metodo](pcd, config_finestra)
 		tempo_totale += tempo
-		mesh_totale += _ritaglia_mesh(mesh, pcd_propri, pcd_altri)
+		stat["tempo_metodo_s"] = tempo
+		mesh = _ritaglia_mesh(mesh, pcd_propri, pcd_altri)
+		# distanza dai punti di QUESTA finestra: Poisson chiude ogni finestra con una cupola nell'acqua
+		mesh_totale += ritaglia_lontano_dai_punti(mesh, pcd_propri + pcd_altri, distanza_max_da_config(config))
+		registra()
+		t_fine_precedente = t_fine
 
 		punti_usati = np.asarray(pcd_usata.points)
 		punti_usati = punti_usati[_vicini_ai_propri(punti_usati, pcd_propri, pcd_altri)]
@@ -327,9 +319,13 @@ def ricostruisci_a_finestre(config: dict):
 	return mesh_totale, campione, tempo_totale, nome_metodo
 
 
-def ricostruisci(config: dict):
-	"""Ricostruzione completa secondo config: intera point cloud o sliding window. Restituisce (mesh, pcd, tempo, nome_metodo)."""
+def ricostruisci(config: dict, statistiche_finestre: list = None):
+	"""Ricostruzione completa secondo config: intera point cloud o sliding window. Restituisce (mesh, pcd, tempo, nome_metodo).
+	Con la sliding window, statistiche_finestre (se e' una lista) riceve latenza e tempi di ogni finestra."""
 	if config.get("sliding_window", {}).get("abilitato"):
-		return ricostruisci_a_finestre(config)
+		return ricostruisci_a_finestre(config, statistiche_finestre)
 	pcd = carica_e_pulisci_point_cloud(config)
-	return ESECUTORI[config["algorithm"]](pcd, config)
+	mesh, pcd_usata, tempo, nome = ESECUTORI[config["algorithm"]](pcd, config)
+	# stesso ritaglio della sliding window, cosi' i due modi restano confrontabili
+	mesh = ritaglia_lontano_dai_punti(mesh, pcd, distanza_max_da_config(config))
+	return mesh, pcd_usata, tempo, nome
