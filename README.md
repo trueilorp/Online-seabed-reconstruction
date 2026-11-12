@@ -11,7 +11,7 @@ metodo gira sia sull'intera scansione sia a **finestre di ping**
 navigazione.
 
 La storia completa delle fasi precedenti (dati reali, Unity, Point2Mesh,
-SA-ConvONet) è in [docs/README_old.md](docs/README_old.md). Le istruzioni di
+SA-ConvONet) è in [README_old.md](README_old.md). Le istruzioni di
 installazione sono in [SETUP.md](SETUP.md).
 
 ## Indice
@@ -19,7 +19,7 @@ installazione sono in [SETUP.md](SETUP.md).
 1. [Struttura del progetto](#struttura-del-progetto)
 2. [Come funziona](#come-funziona)
 3. [Uso](#uso)
-4. [Test in corso: Poisson e PPSurf, con e senza SW](#test-in-corso-poisson-e-ppsurf-con-e-senza-sw)
+4. [Risultati: Poisson e PPSurf, con e senza SW](#risultati-poisson-e-ppsurf-con-e-senza-sw)
 5. [La cartella benchmark: esperimenti fatti e risultati](#la-cartella-benchmark-esperimenti-fatti-e-risultati)
 6. [Perché PPSurf è configurato così](#perché-ppsurf-è-configurato-così)
 7. [Metodi scartati](#metodi-scartati)
@@ -50,7 +50,7 @@ installazione sono in [SETUP.md](SETUP.md).
 │   ├── data_analisys.py            # analisi esplorativa di un CSV di point cloud
 │   ├── sonar/                      # dati reali Omniscan 3D e scansioni Unity
 │   └── synthetic/                  # terreni sintetici: train/ val/ test/ test+val/
-├── docs/                           # README storico (fasi precedenti)
+├── README_old.md                   # README storico (fasi precedenti)
 ├── output/                         # tutto ciò che producono le run (ignorata da git)
 │   └── evaluation/<data_ora>_<split>[_sw]/  # una cartella per run: config.txt, CSV, meshes/, distanze/
 ├── neural_methods/ppsurf/          # repo PPSurf clonato (non tracciato)
@@ -245,63 +245,115 @@ python visualization/visualize_mesh.py      # percorso impostato in testa al fil
 Senza argomenti `evaluate.py` usa i default della sezione `evaluation` del
 config (`test+val`, tutti i terreni, Poisson e PPSurf).
 
-## Test in corso: Poisson e PPSurf, con e senza SW
+## Risultati: Poisson e PPSurf, con e senza SW
 
-**Domande**:
+**Domande**
 
-1. Quanto si perde ricostruendo a finestre (come servirà online) rispetto
-   all'intera scansione, per un metodo classico e per uno neurale?
+1. Quanto si perde ricostruendo a finestre, come servirà online, rispetto
+   all'intera scansione?
 2. Ciascun metodo tiene il passo con il sonar, cioè ha RTF < 1?
 
-**Setup**: split `test+val` (30 terreni, 5 per famiglia), preprocessing e
-parametri del config attuale, τ = 0.5 m (e 0.2 m ricalcolato dalle distanze
-grezze).
+**Setup**: split `test+val`, finestre da 300 ping con 60 di sovrapposizione
+(~47 m di lato, ~40 s di budget), ritaglio a 1 m dai punti, GTX 1650. τ in
+metri. I valori a τ = 0.1 e 0.2 sono ricalcolati con `--ricalcola` dalle
+distanze grezze. In grassetto il migliore fra con e senza SW.
 
-**Ipotesi** da verificare:
+| Run | Cartella |
+|---|---|
+| Poisson | `2026-11-10_12-04-07_test+val` |
+| Poisson + SW | `2026-11-10_22-13-02_test+val_sw` |
+| PPSurf | `2026-11-10_15-15-15_test+val` |
+| PPSurf + SW | `2026-11-10_23-40-13_test+val_sw` |
 
-- **Poisson + SW**, con il ritaglio sulla distanza dai punti, dovrebbe restare
-  vicino a Poisson sull'intero terreno: sulle prove con `flat_sand_012` e
-  `rocky_012` l'F-score è 0.99 in entrambi i modi (vedi
-  [Sliding window](#3-sliding-window-sezione-sliding_window)). Sugli stessi
-  terreni è ampiamente in tempo reale: latenza 2.6–4 s per finestra su ~40 s
-  di budget, RTF mediano 0.07.
-- **PPSurf + SW** probabilmente **non** sarà in tempo reale: ~170 s per
-  ricostruzione su un terreno intero (sulla GTX 1650), e il tempo dipende dalla
-  griglia, non dal numero di punti. Una finestra costa quindi circa quanto un
-  terreno intero, contro ~40 s di budget: RTF atteso intorno a 4.
-- **PPSurf + SW** potrebbe invece **migliorare**. Il guscio doppio di PPSurf ha
-  uno spessore pari a circa l'1% dell'estensione della scena (vedi
-  [sotto](#perché-ppsurf-è-configurato-così)), e una finestra di ~50 m è una
-  scena più piccola del terreno intero da ~100 m. È lo stesso meccanismo
-  della ricostruzione a porzioni (`tile_ppsurf.py`), ottenuto però
-  gratuitamente dalla finestratura.
+### Poisson: effetto della sliding window
 
-### Risultati
+Media su 5 terreni per famiglia.
 
-**Qualità** (media ± std sui 30 terreni):
+| Fondale | SW | Chamfer ↓ | Prec. τ=0.1 | Rich. τ=0.1 | F τ=0.1 | Prec. τ=0.2 | Rich. τ=0.2 | F τ=0.2 | Prec. τ=0.5 | Rich. τ=0.5 | F τ=0.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| flat_sand | No | 0.051 | **0.929** | 0.952 | **0.940** | **0.982** | **0.999** | **0.990** | **0.993** | **1.000** | **0.997** |
+| | Sì | **0.046** | 0.909 | **0.968** | 0.938 | 0.962 | **0.999** | 0.980 | 0.988 | **1.000** | 0.994 |
+| mixed | No | **0.045** | **0.937** | 0.930 | **0.933** | **0.997** | 0.993 | **0.995** | **1.000** | 0.999 | **0.999** |
+| | Sì | 0.046 | 0.900 | **0.956** | 0.927 | 0.962 | **0.996** | 0.978 | 0.987 | **1.000** | 0.993 |
+| ridges | No | **0.034** | **0.974** | 0.970 | **0.972** | **0.999** | 0.996 | **0.998** | **1.000** | **0.999** | **1.000** |
+| | Sì | 0.037 | 0.929 | **0.980** | 0.954 | 0.968 | **0.998** | 0.983 | 0.988 | **0.999** | 0.994 |
+| rocky | No | **0.045** | **0.933** | 0.923 | **0.928** | **0.995** | 0.992 | **0.993** | **0.999** | 0.999 | **0.999** |
+| | Sì | 0.047 | 0.889 | **0.952** | 0.919 | 0.960 | **0.997** | 0.978 | 0.987 | **1.000** | 0.994 |
+| sand_ripples | No | 0.049 | **0.932** | 0.948 | **0.940** | **0.990** | **0.999** | **0.995** | **0.998** | **1.000** | **0.999** |
+| | Sì | **0.045** | 0.912 | **0.965** | 0.938 | 0.969 | **0.999** | 0.984 | 0.989 | **1.000** | 0.994 |
+| slope | No | 0.052 | **0.951** | 0.949 | **0.950** | **0.995** | 0.987 | **0.991** | **0.999** | 0.990 | **0.995** |
+| | Sì | **0.045** | 0.929 | **0.966** | 0.947 | 0.975 | **0.992** | 0.983 | 0.990 | **0.995** | 0.992 |
 
-| Configurazione | Terreni | Chamfer (m) | Precisione τ=0.5 | Richiamo τ=0.5 | F-score τ=0.5 | F-score τ=0.2 | Tempo (s) |
-|---|---|---|---|---|---|---|---|
-| Poisson | | | | | | | |
-| Poisson + SW | | | | | | | |
-| PPSurf | | | | | | | |
-| PPSurf + SW | | | | | | | |
+### PPSurf: effetto della sliding window
 
-**Distribuzione delle distanze** (m, media sui terreni):
+Senza SW: media su 5 terreni per famiglia, TTA/refine 10/10. Con SW: 2
+terreni per famiglia (`*_012`, `*_013`), TTA/refine 3/3. Sugli stessi 12
+terreni il "senza SW" dà valori quasi identici (F τ=0.2 tra 0.08 e 0.49), e
+il passaggio a 3/3 da solo vale circa +0.035 di F a τ=0.2: il salto viene
+dalla sliding window.
 
-| Configurazione | rec→GT mediana | rec→GT IQR | rec→GT p95 | GT→rec mediana | GT→rec IQR | GT→rec p95 |
-|---|---|---|---|---|---|---|
-| Poisson | | | | | | |
-| Poisson + SW | | | | | | |
-| PPSurf | | | | | | |
-| PPSurf + SW | | | | | | |
+| Fondale | SW | Chamfer ↓ | Prec. τ=0.1 | Rich. τ=0.1 | F τ=0.1 | Prec. τ=0.2 | Rich. τ=0.2 | F τ=0.2 | Prec. τ=0.5 | Rich. τ=0.5 | F τ=0.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| flat_sand | No | 0.396 | 0.013 | 0.025 | 0.017 | 0.062 | 0.115 | 0.080 | 0.636 | **0.958** | 0.762 |
+| | Sì | **0.247** | **0.420** | **0.500** | **0.456** | **0.756** | **0.668** | **0.709** | **0.973** | 0.799 | **0.877** |
+| mixed | No | 0.287 | 0.158 | 0.274 | 0.200 | 0.327 | 0.561 | 0.413 | 0.718 | **0.961** | 0.822 |
+| | Sì | **0.153** | **0.378** | **0.601** | **0.464** | **0.697** | **0.852** | **0.766** | **0.982** | 0.946 | **0.964** |
+| ridges | No | 0.264 | 0.232 | 0.407 | 0.296 | 0.412 | 0.706 | 0.520 | 0.694 | **0.977** | 0.811 |
+| | Sì | **0.164** | **0.419** | **0.555** | **0.477** | **0.744** | **0.771** | **0.756** | **0.965** | 0.919 | **0.941** |
+| rocky | No | 0.276 | 0.190 | 0.331 | 0.241 | 0.354 | 0.609 | 0.448 | 0.698 | 0.981 | 0.815 |
+| | Sì | **0.131** | **0.357** | **0.639** | **0.458** | **0.667** | **0.916** | **0.771** | **0.982** | **0.986** | **0.984** |
+| sand_ripples | No | 0.337 | 0.036 | 0.066 | 0.047 | 0.131 | 0.234 | 0.168 | 0.783 | **0.948** | 0.854 |
+| | Sì | **0.205** | **0.380** | **0.488** | **0.427** | **0.741** | **0.708** | **0.724** | **0.973** | 0.845 | **0.905** |
+| slope | No | 0.343 | 0.061 | 0.113 | 0.079 | 0.178 | 0.323 | 0.229 | 0.708 | **0.958** | 0.814 |
+| | Sì | **0.229** | **0.340** | **0.462** | **0.391** | **0.701** | **0.711** | **0.704** | **0.945** | 0.858 | **0.899** |
 
-**Tempo reale** (sliding window, su tutte le finestre):
+### Tempo reale (sliding window)
 
-| Metodo | Finestre | Latenza mediana (s) | Latenza p95 (s) | Budget mediano (s) | RTF mediano | RTF p95 | RTF max | Finestre con RTF ≤ 1 |
-|---|---|---|---|---|---|---|---|---|
-| Poisson + SW | | | | | | | | |
-| PPSurf + SW | | | | | | | | |
+Budget per finestra ~40 s (240 ping nuovi a 6 ping/s). RTF = latenza / budget.
+
+| Metodo | Latenza mediana | Latenza max | RTF mediano | RTF max | Finestre in tempo |
+|---|---|---|---|---|---|
+| Poisson + SW | 3.2–3.4 s | 9.0 s | 0.08–0.09 | 0.22 | 100% |
+| PPSurf + SW | 54–68 s | 285 s | 1.34–1.69 | 7.67 | 0–13% |
+
+Gli intervalli vanno dalla famiglia migliore alla peggiore. Il massimo di
+PPSurf (285 s, una finestra di `slope`) è probabilmente un picco di carico
+del portatile; senza quel caso l'RTF massimo è circa 2.7.
+
+### Discussione
+
+**Poisson**
+- La SW non costa qualità: Chamfer ~0.045 m e F τ=0.5 ≥ 0.99 in entrambi i
+  modi.
+- Con la SW la mesh è più fine, perché la profondità dell'octree è relativa
+  alla finestra: celle ~0.1 m invece di ~0.2 m. Il richiamo a τ=0.1 sale
+  (0.92–0.95 → 0.95–0.98) e il Chamfer migliora su 3 famiglie su 6.
+- La precisione scende dell'1–4% a τ ≤ 0.2: resta un po' di superficie spuria
+  entro 1 m, cioè resti della cupola vicino ai punti e doppi strati dove le
+  passate si sovrappongono.
+- È ampiamente in tempo reale (RTF 0.08): **pronto per l'uso online**.
+
+**PPSurf**
+- La SW migliora molto la qualità: F τ=0.2 da 0.08–0.52 a 0.70–0.77, Chamfer
+  −35/−50%, precisione τ=0.5 da ~0.7 a 0.95–0.98.
+- È la conferma che il guscio doppio scala con l'estensione della scena: una
+  finestra (~47 m) è una scena più piccola del terreno (~100 m), quindi il
+  guscio è più sottile (vedi test 4–5 nel benchmark).
+- **Il problema da risolvere sono i buchi.** Il richiamo a τ=0.5 scende sulle
+  famiglie lisce (`flat_sand` 0.96 → 0.80, `sand_ripples` 0.85, `slope`
+  0.86), non su `rocky` e `mixed`. L'ipotesi, da verificare: il guscio
+  (~0.5 m) diventa paragonabile alla cella di marching cubes (~0.36 m su 47 m
+  con griglia 129), e dove scende sotto la cella i due strati spariscono
+  insieme.
+- **Non è in tempo reale sulla GTX 1650** (RTF mediano ~1.5). Su una GPU circa
+  2 volte più veloce lo sarebbe.
+- Resta comunque lontano da Poisson: F τ=0.2 0.70–0.77 contro ~0.98.
+
+**Prossimi passi**
+1. Buchi di PPSurf + SW: verificare l'ipotesi su un terreno liscio (griglia
+   più fine per finestra, o finestre più grandi), poi scegliere la correzione.
+2. Tempo di PPSurf + SW: provarlo su una GPU più veloce.
+3. Poisson + SW: deduplicare le zone dove le passate si sovrappongono.
 
 ## La cartella benchmark: esperimenti fatti e risultati
 
@@ -501,8 +553,8 @@ fissati dalla griglia) contro ~7 s di Poisson, circa 150 volte tanto.
 - **Scene piccole invece di griglie fini**: poiché il guscio scala con
   l'estensione della scena (test 4 e 5), la leva giusta è ricostruire scene più
   piccole. A porzioni funziona ma costa troppo. La sliding window produce
-  scene piccole per costruzione: il test in corso verifica se ne eredita il
-  beneficio.
+  scene piccole per costruzione, e ne eredita il beneficio: F τ=0.2 da
+  0.08–0.52 a 0.70–0.77 (vedi [Risultati](#risultati-poisson-e-ppsurf-con-e-senza-sw)).
 - **Prossimi passi possibili**: tenere il modello caricato tra una finestra e
   l'altra della sliding window (5–10 s risparmiati a finestra), oppure un
   fine-tuning su superfici aperte, che attacca la causa del guscio. Gli autori

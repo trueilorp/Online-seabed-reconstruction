@@ -216,10 +216,28 @@ def salva_csv(righe: list, cartella_out: str):
 			   "latenza_mediana_s", "latenza_max_s", "rtf_mediano", "rtf_max", "finestre_in_tempo"]
 	colonne = [c for c in colonne if c in ok.columns]  # le colonne della SW esistono solo con la SW
 	gruppi = ["famiglia", "metodo", "sliding_window"]
-	per_famiglia = ok.groupby(gruppi)[colonne].mean()
-	per_famiglia.insert(0, "n_terreni", ok.groupby(gruppi).size())
-	per_famiglia.reset_index().to_csv(
+	media_e_std(ok, gruppi, colonne).to_csv(
 		os.path.join(cartella_out, CSV_FAMIGLIA), index=False, float_format="%.3f")
+
+
+COLONNE_STD = ["chamfer", "precisione", "richiamo", "fscore"]
+
+
+def media_e_std(df: pd.DataFrame, gruppi: list, colonne: list) -> pd.DataFrame:
+	"""Medie per gruppo, con <col>_std (deviazione standard tra terreni) subito dopo le metriche di qualita'.
+	La std e' vuota con un solo terreno nel gruppo."""
+	g = df.groupby(gruppi)
+	medie = g[colonne].mean()
+	std = g[[c for c in COLONNE_STD if c in colonne]].std()
+	ordine = []
+	for c in colonne:
+		ordine.append(c)
+		if c in std.columns:
+			medie[f"{c}_std"] = std[c]
+			ordine.append(f"{c}_std")
+	medie = medie[ordine]
+	medie.insert(0, "n_terreni", g.size())
+	return medie.reset_index()
 
 
 def salva_finestre(finestre: list, cartella_out: str, id_terreno: str, metodo: str):
@@ -252,9 +270,8 @@ def ricalcola_tau(cartella_run: str, tau: list):
 	df = pd.DataFrame(righe)
 	df.to_csv(os.path.join(cartella_run, "metriche_tau.csv"), index=False, float_format="%.3f")
 	gruppi = ["famiglia", "metodo", "sliding_window", "tau"]
-	medie = df.groupby(gruppi)[["chamfer", "precisione", "richiamo", "fscore"]].mean()
-	medie.insert(0, "n_terreni", df.groupby(gruppi).size())
-	medie.reset_index().to_csv(os.path.join(cartella_run, "metriche_tau_per_famiglia.csv"), index=False, float_format="%.3f")
+	media_e_std(df, gruppi, COLONNE_STD).to_csv(
+		os.path.join(cartella_run, "metriche_tau_per_famiglia.csv"), index=False, float_format="%.3f")
 	tutti = df.groupby(["metodo", "sliding_window", "tau"])[["chamfer", "precisione", "richiamo", "fscore"]].mean()
 	print(tutti.round(3).to_string())
 	print(f"\nScritti metriche_tau.csv e metriche_tau_per_famiglia.csv in {cartella_run}")
@@ -272,7 +289,7 @@ def main():
 						help="soglia in metri; con --ricalcola se ne possono dare piu' d'una")
 	parser.add_argument("--ricalcola", metavar="CARTELLA_RUN", default=None,
 						help="non ricostruisce: ricalcola le metriche per ogni --tau dalle distanze di questa run")
-	parser.add_argument("--set", nargs="+", default=[], metavar="SEZIONE.CHIAVE=VALORE",
+	parser.add_argument("--set", nargs="+", action="extend", default=[], metavar="SEZIONE.CHIAVE=VALORE",
 						help="sovrascrive valori del config, es. --set ppsurf.gen_refine_iter=5 poisson.profondita=8")
 	parser.add_argument("--sliding_window", choices=["on", "off"], default=None,
 						help="sovrascrive sliding_window.abilitato del config")

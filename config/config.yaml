@@ -26,8 +26,9 @@ postprocessing:
 # zona) vengono unite. Attivabile anche da riga di comando: evaluate.py --sliding_window on/off.
 sliding_window:
   abilitato: false
-  ping_per_finestra: 300             # ping per finestra (sintetici: ~190 punti/ping, 300 ping ~ 50 m di rotta)
-  ping_sovrapposizione: 60           # ping in comune tra finestre consecutive (divisi a meta' nel ritaglio)
+  ping_per_finestra: 150             # ping per finestra (sintetici: ~190 punti/ping, 150 ping ~ 25 m di rotta)
+  # con 300 ping PPSurf lasciava molti buchi (flat_sand_012: richiamo a tau=0.2 0.70 -> 0.98 con 150)
+  ping_sovrapposizione: 30           # ping in comune tra finestre consecutive (divisi a meta' nel ritaglio)
   righe_per_blocco: 20000            # righe lette dal CSV per volta (simula l'arrivo dei dati)
   punti_campione_per_finestra: 5000  # punti tenuti per finestra (restituiti con la mesh, non usati dalle metriche)
 
