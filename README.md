@@ -1,629 +1,465 @@
-# Progetto Barca — Ricostruzione 3D del fondale da sonar multibeam
+# Seabed 3D reconstruction from multibeam sonar
 
-Ricostruzione 3D del fondale e di infrastrutture sommerse (tubi, piloni) da
-point cloud di sonar multibeam (Cerulean Omniscan 3D), in collaborazione con
-un'azienda che produce robot subacquei. Supervisione: Daniele.
+This repository reconstructs a 3D mesh of the seabed from multibeam sonar point
+clouds and evaluates the result against a known ground truth.
 
-Oggi il progetto confronta due metodi, **Poisson** (classico) e **PPSurf**
-(neurale, pre-addestrato), su terreni sintetici con ground truth nota. Ogni
-metodo gira sia sull'intera scansione sia a **finestre di ping**
-(*sliding window*, SW), cioè come se i dati arrivassero dal sonar durante la
-navigazione.
+It compares two methods on synthetic terrains:
 
-La storia completa delle fasi precedenti (dati reali, Unity, Point2Mesh,
-SA-ConvONet) è in [README_old.md](README_old.md). Le istruzioni di
-installazione sono in [SETUP.md](SETUP.md).
+- **Poisson**: classical Poisson Surface Reconstruction (Open3D);
+- **PPSurf**: a neural, patch-based method, used with its pretrained weights.
 
-## Indice
+Each method runs in two modes:
 
-1. [Struttura del progetto](#struttura-del-progetto)
-2. [Come funziona](#come-funziona)
-3. [Uso](#uso)
-4. [Risultati: Poisson e PPSurf, con e senza SW](#risultati-poisson-e-ppsurf-con-e-senza-sw)
-5. [La cartella benchmark: esperimenti fatti e risultati](#la-cartella-benchmark-esperimenti-fatti-e-risultati)
-6. [Perché PPSurf è configurato così](#perché-ppsurf-è-configurato-così)
-7. [Metodi scartati](#metodi-scartati)
-8. [Note tecniche](#note-tecniche)
+- **full scan**: the whole point cloud of a terrain is reconstructed at once;
+- **sliding window (SW)**: the scan is read in windows of pings, as if the
+  data were arriving from the sonar during the survey.
 
-## Struttura del progetto
+Installation is described in [SETUP.md](SETUP.md). Diagnostic experiments,
+parameter choices and discarded methods are in [ANALYSIS.md](ANALYSIS.md).
+
+## Table of contents
+
+1. [Repository layout](#repository-layout)
+2. [Method](#method)
+   - [Synthetic data](#synthetic-data)
+   - [Reconstruction pipeline](#reconstruction-pipeline)
+   - [Sliding window](#sliding-window)
+   - [Real-time metrics](#real-time-metrics)
+   - [Evaluation metrics](#evaluation-metrics)
+   - [Run output](#run-output)
+3. [Usage](#usage)
+4. [Results](#results)
+   - [Setup](#setup)
+   - [Accuracy](#accuracy)
+   - [Timing](#timing)
+   - [Discussion](#discussion)
+5. [Next steps](#next-steps)
+6. [Technical notes](#technical-notes)
+
+## Repository layout
 
 ```
 .
-├── evaluate.py                     # ENTRY POINT: ricostruisce e valuta i terreni sintetici
-├── config/config.yaml              # parametri di preprocessing, sliding window, metodi e valutazione
+├── evaluate.py                     # ENTRY POINT: reconstructs and evaluates the synthetic terrains
+├── config/config.yaml              # preprocessing, sliding window, method and evaluation parameters
 ├── scripts/
-│   ├── poisson.py                  # Poisson Surface Reconstruction (Open3D) + taglio per densità + pulizia
-│   └── ppsurf.py                   # PPSurf lanciato come sottoprocesso nell'ambiente conda "pps"
+│   ├── poisson.py                  # Poisson reconstruction (Open3D), density trim, mesh cleanup
+│   └── ppsurf.py                   # runs PPSurf as a subprocess in the conda env "pps"
 ├── utils/
-│   ├── pipeline.py                 # caricamento config, preprocessing, esecutori dei metodi, sliding window
-│   ├── mesh.py                     # lettura CSV, pulizia point cloud, normali, top_surface (fondale della GT)
-│   ├── generate_seabed_heightmaps.py  # genera i fondali sintetici (6 famiglie, con tubi e piloni)
-│   ├── simulate_multibeam_scans.py    # simula la scansione multibeam -> <id>_scan.csv + <id>_ground_truth.obj
-│   ├── mesh_comparison.py          # (legacy) grafici di confronto sul dataset Unity Terrain_unity
-│   └── comparison_ground_truth_obj_and_unity_csv.py  # (legacy) allineamento CSV Unity / OBJ
-├── benchmark/                      # esperimenti di diagnosi e tempi (vedi sezione dedicata)
-│   └── benchmark_output/           # i loro risultati (CSV, mesh; ignorata da git)
+│   ├── pipeline.py                 # config loading, preprocessing, method executors, sliding window, crop
+│   ├── mesh.py                     # CSV loading, point cloud cleanup, normals, top_surface (GT seabed)
+│   ├── run_info.py                 # environment, git state, terminal log, RAM/VRAM monitor for each run
+│   ├── generate_seabed_heightmaps.py  # generates the synthetic seabeds (6 families, pipes and pillars)
+│   ├── simulate_multibeam_scans.py    # simulates the multibeam scan -> <id>_scan.csv + <id>_ground_truth.obj
+│   ├── mesh_comparison.py          # (legacy) comparison plots on the Unity dataset Terrain_unity
+│   └── comparison_ground_truth_obj_and_unity_csv.py  # (legacy) alignment of Unity CSV and OBJ
 ├── visualization/
-│   ├── visualize_mesh.py           # visualizzatore Open3D di una mesh .ply (con screenshot)
-│   └── orbite_mesh.py              # video orbitale attorno a una mesh (per slide)
+│   ├── plot_chamfer.py             # Chamfer per seabed family, 4 configurations -> imgs/
+│   ├── plot_tau.py                 # precision, recall, F-score as a function of τ -> imgs/
+│   ├── plot_rtf.py                 # real-time factor per window, Poisson + SW vs PPSurf + SW -> imgs/
+│   ├── screenshot_run.py           # screenshots of all meshes of one or more runs
+│   ├── visualize_mesh.py           # interactive Open3D viewer for a .ply mesh
+│   └── orbite_mesh.py              # orbit video around a mesh
+├── benchmark/                      # diagnostic and timing experiments (see ANALYSIS.md)
+│   └── benchmark_output/           # their results (CSV, meshes; ignored by git)
+├── imgs/                           # plots used in this README
 ├── data/
-│   ├── data_analisys.py            # analisi esplorativa di un CSV di point cloud
-│   ├── sonar/                      # dati reali Omniscan 3D e scansioni Unity
-│   └── synthetic/                  # terreni sintetici: train/ val/ test/ test+val/
-├── README_old.md                   # README storico (fasi precedenti)
-├── output/                         # tutto ciò che producono le run (ignorata da git)
-│   └── evaluation/<data_ora>_<split>[_sw]/  # una cartella per run: config.txt, CSV, meshes/, distanze/
-├── neural_methods/ppsurf/          # repo PPSurf clonato (non tracciato)
-├── env_setup.sh                    # "source env_setup.sh": fix WSLg + attiva l'ambiente conda
-├── requirements.txt                # dipendenze dell'ambiente "ricostruzione3d"
-└── SETUP.md                        # installazione su una macchina nuova
+│   ├── data_analisys.py            # exploratory analysis of a point cloud CSV
+│   ├── sonar/                      # real Omniscan 3D data and Unity scans
+│   ├── real/                       # other real data (Malamocco)
+│   └── synthetic/                  # synthetic terrains: train/ val/ test/ test+val/
+├── output/                         # everything produced by runs (ignored by git)
+│   └── evaluation/<date_time>_<split>[_sw]/  # one folder per run
+├── neural_methods/ppsurf/          # cloned PPSurf repository (not tracked)
+├── env_setup.sh                    # "source env_setup.sh": WSLg fix + activates the conda env
+├── requirements.txt                # dependencies of the "ricostruzione3d" environment
+├── ANALYSIS.md                     # experiments and parameter choices (Italian)
+├── README_old.md                   # historical README (earlier project phases)
+└── SETUP.md                        # installation on a new machine
 ```
 
-## Come funziona
+## Method
 
-### 1. Dati sintetici
+### Synthetic data
 
-I dati reali non hanno una ground truth, quindi la valutazione si fa su
-fondali sintetici generati in due passi:
+The terrains are generated in two steps.
 
-1. `utils/generate_seabed_heightmaps.py` genera heightmap di circa 100×100 m in
-   **6 famiglie**: `flat_sand`, `sand_ripples`, `ridges`, `rocky`, `slope` e
-   `mixed`. Con `--with-structures` aggiunge tubi e piloni. Lo split è fatto
-   per terreno: train 72, val 18, test 12.
-2. `utils/simulate_multibeam_scans.py` simula il sonar. La piattaforma percorre
-   una serpentina; a ogni ping un ventaglio di raggi viene tracciato sulla mesh,
-   con rumore sul range, dropout e outlier. I parametri sono stimati dal dataset
-   reale `OS3D_Max_Range_Test.csv` (~6 ping/s, ~276 punti per ping). Per ogni
-   terreno produce:
-   - `<id>_scan.csv`: la point cloud (`x,y,z,intensity,ping_number,elapsed_s`, con Y verticale);
-   - `<id>_ground_truth.obj`: la mesh vera, chiusa (fondale + pareti + fondo).
+1. `utils/generate_seabed_heightmaps.py` generates heightmaps of 100 × 100 m in
+   **6 families**: `flat_sand`, `sand_ripples`, `ridges`, `rocky`, `slope` and
+   `mixed`. With `--with-structures` it adds pipes and pillars. The split is
+   done per terrain, never per scan; the current dataset has 17 terrains per
+   family: train 72, val 18, test 12.
+2. `utils/simulate_multibeam_scans.py` simulates the sonar. The platform follows
+   a lawn-mower path; at each ping a fan of beams is ray-cast on the terrain
+   mesh, with range noise, dropout and outliers. The sensor parameters are
+   set as constants at the top of the script. The ping rate (6 pings/s) and
+   the fan aperture (120°) are estimated from the real dataset
+   `OS3D_Max_Range_Test.csv`, which has ~276 points per ping; the simulator
+   uses 200 beams per ping. For each terrain it writes:
+   - `<id>_scan.csv`: the point cloud, columns
+     `x,y,z,intensity,ping_number,elapsed_s` (Y is vertical, `elapsed_s` is the
+     time since the start of the scan);
+   - `<id>_ground_truth.obj`: the true mesh, closed (seabed + walls + bottom);
+   - `<id>_scan.json`: scan parameters and applied offsets.
 
-`data/synthetic/test+val/` raccoglie i 30 terreni di test e val, 5 per famiglia.
-È l'insieme su cui girano i test attuali.
+All results in this README use `data/synthetic/test+val/`. This folder is the
+union of `val/` and `test/`: 30 terrains, 5 per family (`*_012`–`*_014` from
+val, `*_015`–`*_016` from test). It is created by hand; the command is in
+[SETUP.md](SETUP.md#4-synthetic-data).
 
-### 2. Pipeline di ricostruzione (`utils/pipeline.py`)
+### Reconstruction pipeline
 
+`utils/pipeline.py` runs the same steps for every method:
+
+```mermaid
+flowchart LR
+    A["&lt;id&gt;_scan.csv"] --> B["Preprocessing<br/>voxel 0.5 m<br/>+ statistical outlier removal"]
+    B --> C{Method}
+    C -->|Poisson| D["normals: k = 30 neighbours, oriented +Y<br/>octree depth 9<br/>trim 5% lowest-density vertices"]
+    C -->|PPSurf| E["subprocess pps.py rec<br/>in conda env pps<br/>grid 129"]
+    D --> F["Distance crop<br/>remove triangles &gt; 1 m<br/>from the points"]
+    E --> F
+    F --> G[mesh]
 ```
-<id>_scan.csv ──► preprocessing ──► metodo ──────────────────────────────► ritaglio ──► mesh
-                  voxel 0.5 m        Poisson: normali (30 vicini) → depth 9   via i triangoli
-                  + outlier          → taglio del 5% a densità più bassa      a > 1 m dai punti
-                  statistici         PPSurf: sottoprocesso pps.py, griglia 129
-```
 
-- **Preprocessing** (sezione `preprocessing`): downsampling su voxel da 0.5 m e
-  rimozione statistica degli outlier (20 vicini, 2 std). È uguale per tutti i
-  metodi.
-- **Poisson** (`scripts/poisson.py`): stima delle normali, ricostruzione,
-  rimozione dei vertici a bassa densità, dove Poisson "inventa" superficie
-  lontano dai punti. Le mesh vengono salvate senza colori.
-- **PPSurf** (`scripts/ppsurf.py`): la point cloud viene scritta su disco e
-  ricostruita da `neural_methods/ppsurf/pps.py` nell'ambiente conda `pps`. La
-  mesh viene riletta in metri.
-- **Ritaglio** (sezione `postprocessing`): vengono tolti i triangoli il cui
-  baricentro dista più di 1 m (`distanza_max_punti`) dal punto più vicino della
-  point cloud pulita. Serve soprattutto alla sliding window (vedi sotto), ma si
-  applica anche senza, così i due modi restano confrontabili. La soglia deve
-  restare sopra τ (0.5 m): con una soglia ≤ τ la precisione sarebbe garantita
-  dal ritaglio stesso.
-
-### 3. Sliding window (sezione `sliding_window`)
-
-Simula l'uso online: il CSV viene letto a blocchi di righe come se arrivasse
-dal sonar, e i punti vengono raggruppati in finestre di **150 ping** (circa
-25 m di rotta) che si sovrappongono di 30 ping. Con finestre da 300 ping
-(~50 m) PPSurf lasciava molti buchi sui fondali lisci: vedi
-[Risultati](#risultati-poisson-e-ppsurf-con-e-senza-sw).
-
-Ogni finestra viene pulita e ricostruita da sola. Della sua mesh si tengono
-solo i triangoli della zona "propria" della finestra: la sovrapposizione è
-divisa a metà con la finestra successiva. Poi la mesh viene ritagliata sulla
-distanza dai punti **della finestra** e unita alle altre. In memoria resta
-solo la finestra corrente.
-
-Il ritaglio sulla distanza è indispensabile per Poisson. Una finestra è una
-striscia aperta su tutti i lati (~26 m di larghezza), e Poisson la chiude con
-una **cupola nell'acqua**, circa 6 m sopra il fondale. Il taglio per densità
-al 5% non la toglie: su `flat_sand_012`, senza ritaglio, era spuria il 36%
-della superficie (F-score 0.78, p95 ricostruzione→fondale 12.5 m). Con il
-ritaglio a 1 m Poisson + SW torna al livello di Poisson sull'intero terreno.
-Questi i valori di prova, a τ = 0.5 m, con le finestre da 300 ping usate
-allora:
-
-| Terreno | Modo | Chamfer | Precisione | F-score | p95 rec→GT |
-|---|---|---|---|---|---|
-| flat_sand_012 | intero | 0.050 m | 0.997 | 0.999 | 0.11 m |
-| flat_sand_012 | SW, senza ritaglio | 1.133 m | 0.642 | 0.782 | 12.4 m |
-| flat_sand_012 | SW, ritaglio 1 m | 0.047 m | 0.988 | 0.994 | 0.15 m |
-| rocky_012 | intero | 0.047 m | 1.000 | 1.000 | 0.12 m |
-| rocky_012 | SW, senza ritaglio | 0.151 m | 0.905 | 0.950 | 1.19 m |
-| rocky_012 | SW, ritaglio 1 m | 0.053 m | 0.986 | 0.993 | 0.22 m |
-
-**Limiti noti della finestratura**:
-
-- Le finestre seguono il tempo, non lo spazio. Le passate adiacenti della
-  serpentina si sovrappongono del 30% (strisce di ~26 m ogni ~18 m) e la
-  stessa zona viene ricostruita da due finestre lontane nel tempo. Con la SW
-  circa metà delle colonne verticali ha quindi **due superfici**, molto vicine
-  fra loro: le metriche non ne risentono, la mesh finale però sì.
-  Deduplicarle richiederebbe di assegnare ogni zona del fondale alla prima
-  finestra che la copre.
-- Circa una finestra su tre contiene una virata (passa da una passata alla
-  successiva) e ha quindi forma a U invece che a striscia. Finora non ha
-  dato problemi.
-
-Si attiva con `--sliding_window on` (o `abilitato: true` nel config). Le mesh
-e le distanze prendono il suffisso `_sw`.
-
-**Tempo reale.** Per ogni finestra vengono salvati in `finestre.csv`:
-
-| Campo | Definizione |
-|---|---|
-| `latenza_s` | da quando la finestra è completa (arriva il suo ultimo ping) a quando la sua mesh è unita al resto: filtri, pulizia, ricostruzione (compreso l'avvio del metodo) e ritaglio |
-| `tempo_metodo_s` | solo la ricostruzione, come misurata dal metodo |
-| `acquisizione_s` | durata della finestra, dal primo all'ultimo ping (colonna `elapsed_s` della scansione) |
-| `budget_s` | tempo tra il completamento della finestra precedente e di questa, cioè il tempo disponibile prima che arrivi la successiva. Con 150 ping e 30 di sovrapposizione arrivano 120 ping nuovi, ~20 s a 6 ping/s |
-| `rtf` | *real-time factor* = `latenza_s / budget_s` |
-
-Con **RTF < 1** il metodo tiene il passo con il sonar; con RTF > 1 le finestre
-si accumulano. Per ogni terreno il CSV principale riporta anche
-`latenza_mediana_s`, `latenza_max_s`, `rtf_mediano`, `rtf_max` e
-`finestre_in_tempo` (la frazione di finestre con RTF ≤ 1).
-
-### 4. Valutazione (`evaluate.py`)
-
-Per ogni terreno e metodo vengono campionati **100 000 punti** uniformi sulla
-mesh ricostruita e altrettanti sul fondale della ground truth. Poi si misura
-la distanza esatta punto-superficie in entrambe le direzioni:
-
-| Metrica | Definizione | Cosa misura |
+| Step | Config section | What it does |
 |---|---|---|
-| **precisione** | % di punti della ricostruzione entro τ dal fondale | superficie spuria (guscio doppio, "tende" ai bordi) |
-| **richiamo** | % di punti del fondale entro τ dalla ricostruzione | buchi |
-| **F-score** | media armonica di precisione e richiamo | sintesi a soglia τ |
-| **Chamfer** | (media ricostruzione→fondale + media fondale→ricostruzione) / 2, in metri | errore medio, senza soglia |
-| **mediana, IQR, p95** | per ciascuna delle due direzioni (`rec2gt_*`, `gt2rec_*`) | distribuzione degli errori: la mediana è l'errore tipico, l'IQR (p75 − p25) la dispersione, il p95 la coda |
+| Preprocessing | `preprocessing` | Voxel downsampling at 0.5 m (`voxel_size`), then statistical outlier removal with 20 neighbours (`nb_neighbors`) and 2 standard deviations (`std_ratio`). Same for all methods. |
+| Poisson | `poisson` (`scripts/poisson.py`) | Normals from the 30 nearest neighbours, oriented upwards (+Y). Octree depth 9 (`profondita`). Vertices in the lowest 5% of density are removed (`rimuovi_bassa_densita`): that is where Poisson invents surface far from the data. Then degenerate and duplicated triangles are removed. |
+| PPSurf | `ppsurf` (`scripts/ppsurf.py`) | The point cloud is written to disk and reconstructed by `neural_methods/ppsurf/pps.py` in the conda environment `pps` (`conda_env`). Marching-cubes grid 129 (`gen_resolution_global`). The mesh is read back in the input coordinates (metres). The subprocess is killed after `timeout_s` (1200 s). |
+| Distance crop | `postprocessing` | Triangles whose centroid is more than 1 m (`distanza_max_punti`) from the nearest input point are removed. |
 
-La media, e quindi il Chamfer, è dominata dalle code: pochi metri di
-superficie spuria lontana pesano quanto moltissimi punti corretti. Mediana e
-p95 separano i due casi, cioè "è tutto un po' impreciso" da "è quasi tutto
-giusto, tranne una parte molto sbagliata".
+The distance crop is applied in both modes, so that full-scan and SW results
+stay comparable. Its threshold must stay above τ (0.5 m); with a threshold
+≤ τ, precision would be guaranteed by the crop itself.
 
-Le metriche si calcolano contro il **solo fondale**, non contro la GT intera.
-La GT è un blocco chiuso: le pareti e il fondo servono solo a chiuderla e il
-sonar non li vede mai. `top_surface` (`utils/mesh.py`) li stacca. Contro la GT
-intera, una superficie spuria che scende lungo le pareti risulterebbe
-"corretta"; contro il solo fondale viene penalizzata, com'è giusto.
+### Sliding window
 
-τ = 0.5 m (pari al voxel del preprocessing). Le colonne `accuratezza_*` del
-CSV, invece, sono misurate contro la GT intera e restano solo per confronto
-con i CSV vecchi.
+The sliding window (config section `sliding_window`) simulates online use.
+The CSV is read in blocks of rows (`righe_per_blocco`), as if it were
+arriving from the sonar. The points are grouped into windows of **150 pings**
+(`ping_per_finestra`, ~25 m of track) that overlap by **30 pings**
+(`ping_sovrapposizione`). With 300-ping windows (~50 m), PPSurf left many
+holes on smooth seabeds; see
+[ANALYSIS.md](ANALYSIS.md#dimensione-della-finestra-e-buchi-di-ppsurf).
 
-**Output.** Ogni lancio di `evaluate.py` crea una cartella nuova,
-`output/evaluation/<data_ora>_<split>[_sw]/` (per esempio
-`2026-11-10_11-04-59_test+val_sw/`), con tutto ciò che riguarda quella run e
-solo quella:
-
-- `config.txt`: la config effettivamente usata, con le opzioni da riga di
-  comando già applicate, e il comando lanciato;
-- `metriche_per_terreno.csv`: una riga per (terreno, metodo);
-- `metriche_per_famiglia.csv`: medie per famiglia;
-- `finestre.csv` (solo con SW): una riga per finestra, con latenza e RTF;
-- `meshes/<id>_<metodo>[_sw].ply`;
-- `distanze/<id>_<metodo>[_sw]_{rec2gt,gt2rec}.npy`: i due vettori di
-  distanza grezzi (float32, 100k valori). `rec2gt` va dalla ricostruzione al
-  fondale, `gt2rec` dal fondale alla ricostruzione.
-
-**Altre soglie τ senza ricostruire.** Dalle distanze grezze di una run si
-ricalcolano Chamfer, precisione, richiamo e F-score per qualsiasi τ:
-
-```bash
-python evaluate.py --ricalcola output/evaluation/<run> --tau 0.5 0.2 0.1
+```mermaid
+flowchart TB
+    S["Ping stream from the CSV<br/>(read in blocks of rows)"] --> W1["Window k: 150 pings"]
+    S --> W2["Window k+1: 150 pings"]
+    W1 -.-|"30-ping overlap<br/>15 pings to each window"| W2
+    W1 --> R1["Clean + reconstruct<br/>window k alone"]
+    W2 --> R2["Clean + reconstruct<br/>window k+1 alone"]
+    R1 --> O1["Ownership crop: keep triangles closer to<br/>the window's own pings than to the overlap"]
+    R2 --> O2["Ownership crop"]
+    O1 --> D1["Distance crop: &gt; 1 m<br/>from the window's points"]
+    O2 --> D2["Distance crop"]
+    D1 --> M["Merge into the global mesh<br/>(the window is then discarded)"]
+    D2 --> M
 ```
 
-Il comando scrive nella cartella della run `metriche_tau.csv` (una riga per
-terreno, metodo e τ) e `metriche_tau_per_famiglia.csv` (medie), e stampa le
-medie per metodo.
+- Each window is cleaned and reconstructed on its own. Only the current window
+  is kept in memory.
+- **Ownership crop.** The overlap is split in half between two consecutive
+  windows. Of each window's mesh, only the triangles closer to the window's own
+  pings than to the overlap pings are kept. The first window keeps its start
+  and the last window keeps everything that remains.
+- **Distance crop.** The mesh is then cropped at 1 m from the points of that
+  window, and merged with the others.
+- A window with fewer than 100 points after cleaning is skipped.
 
-## Uso
+The distance crop is essential for Poisson. A window is a strip open on all
+sides (~26 m wide), and Poisson closes it with a **dome in the water**, about
+6 m above the seabed. The 5% density trim does not remove it: on
+`flat_sand_012`, without the crop, 36% of the surface was spurious (F-score
+0.78, p95 reconstruction→seabed 12.5 m). With the 1 m crop, Poisson + SW is
+back at the level of Poisson on the full scan. Test values at τ = 0.5 m, with
+the 300-ping windows used at the time:
 
-Dalla root del progetto, con l'ambiente `ricostruzione3d` attivo
-(`source env_setup.sh`):
+| Terrain | Mode | Chamfer | Precision | F-score | p95 rec→GT |
+|---|---|---|---|---|---|
+| flat_sand_012 | full | 0.050 m | 0.997 | 0.999 | 0.11 m |
+| flat_sand_012 | SW, no crop | 1.133 m | 0.642 | 0.782 | 12.4 m |
+| flat_sand_012 | SW, 1 m crop | 0.047 m | 0.988 | 0.994 | 0.15 m |
+| rocky_012 | full | 0.047 m | 1.000 | 1.000 | 0.12 m |
+| rocky_012 | SW, no crop | 0.151 m | 0.905 | 0.950 | 1.19 m |
+| rocky_012 | SW, 1 m crop | 0.053 m | 0.986 | 0.993 | 0.22 m |
 
-```bash
-# test completi su test+val (30 terreni): le quattro configurazioni
-python evaluate.py --split test+val --methods poisson ppsurf --sliding_window off
-python evaluate.py --split test+val --methods poisson ppsurf --sliding_window on
+The sliding window is enabled with `--sliding_window on` (or
+`sliding_window.abilitato: true` in the config). Meshes, distance files and
+the run folder get the suffix `_sw`.
 
-# prova rapida: 1 terreno per famiglia, un solo metodo
-python evaluate.py --split val --limit 1 --methods poisson
+### Real-time metrics
 
-# metriche a τ diversi su una run già fatta (nessuna ricostruzione)
-python evaluate.py --ricalcola output/evaluation/<run> --tau 0.5 0.2
+With the sliding window, every window gets one row in `finestre.csv`
+("windows"):
 
-# guardare una mesh
-python visualization/visualize_mesh.py      # percorso impostato in testa al file
-```
-
-`--limit N` prende i primi N terreni **di ogni famiglia**, non N in totale.
-Senza argomenti `evaluate.py` usa i default della sezione `evaluation` del
-config (`test+val`, tutti i terreni, Poisson e PPSurf).
-
-## Risultati: Poisson e PPSurf, con e senza SW
-
-**Domande**
-
-1. Quanto si perde ricostruendo a finestre, come servirà online, rispetto
-   all'intera scansione?
-2. Ciascun metodo tiene il passo con il sonar, cioè ha RTF < 1?
-
-**Setup**: split `test+val` (30 terreni, 5 per famiglia), finestre da 150
-ping con 30 di sovrapposizione (~25 m di rotta, ~20 s di budget), ritaglio a
-1 m dai punti, config di default (PPSurf: griglia 129, TTA/refine 3/3) con
-`ppsurf.rec_batch_size=50000`, che cambia solo velocità e memoria. Macchina:
-PC di Verona, GTX TITAN X 12 GB. τ in metri; i valori a τ = 0.1 e 0.2 sono
-ricalcolati con `--ricalcola`. Media ± std tra i 5 terreni della famiglia (std
-solo su Chamfer e F τ=0.5; le altre sono ≤ 0.03, si trovano nei CSV). In
-grassetto il migliore fra con e senza SW.
-
-| Run | Cartella |
+| Column | Definition |
 |---|---|
-| Poisson | `2026-11-13_00-17-36_test+val` |
-| PPSurf | `2026-11-13_00-21-04_test+val` |
-| Poisson + SW | `2026-11-13_00-44-19_test+val_sw` |
-| PPSurf + SW | `2026-11-13_01-11-45_test+val_sw` |
+| `latenza_s` | Latency: from the moment the window is complete (its last ping arrives) to the moment its mesh is merged. Includes filtering, cleaning, reconstruction (with method start-up) and cropping. |
+| `tempo_metodo_s` | Reconstruction only, as measured by the method. |
+| `acquisizione_s` | Acquisition time: duration of the window, from first to last ping (`elapsed_s` column of the scan). |
+| `budget_s` | Time between the completion of the previous window and of this one, i.e. the time available before the next window arrives. With 150 pings and a 30-ping overlap, 120 new pings arrive per window, ~20 s at 6 pings/s. For the first window it equals `acquisizione_s`. |
+| `rtf` | Real-time factor = `latenza_s / budget_s`. |
 
-### Poisson: effetto della sliding window
+With **RTF < 1** the method keeps up with the sonar; with RTF > 1 windows pile
+up. For each terrain, `metriche_per_terreno.csv` also reports
+`latenza_mediana_s` (median latency), `latenza_max_s` (maximum latency),
+`rtf_mediano`, `rtf_max` and `finestre_in_tempo` (fraction of windows with
+RTF ≤ 1).
 
-| Fondale | SW | Chamfer ↓ | Prec. τ=0.1 | Rich. τ=0.1 | F τ=0.1 | Prec. τ=0.2 | Rich. τ=0.2 | F τ=0.2 | Prec. τ=0.5 | Rich. τ=0.5 | F τ=0.5 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| flat_sand | No | 0.050 ± 0.001 | **0.929** | 0.953 | 0.941 | **0.982** | **0.999** | **0.990** | **0.993** | **1.000** | **0.997** ± 0.002 |
-| | Sì | **0.042** ± 0.001 | 0.922 | **0.970** | **0.946** | 0.974 | **0.999** | 0.987 | 0.990 | **1.000** | 0.995 ± 0.000 |
-| mixed | No | 0.045 ± 0.001 | **0.936** | 0.929 | **0.933** | **0.997** | 0.993 | **0.995** | **1.000** | 0.999 | **0.999** ± 0.000 |
-| | Sì | **0.044** ± 0.002 | 0.899 | **0.957** | 0.927 | 0.968 | **0.996** | 0.982 | 0.990 | **1.000** | 0.995 ± 0.001 |
-| ridges | No | **0.034** ± 0.001 | **0.974** | 0.970 | **0.972** | **0.999** | 0.996 | **0.998** | **1.000** | 0.999 | **0.999** ± 0.001 |
-| | Sì | 0.037 ± 0.001 | 0.925 | **0.980** | 0.952 | 0.971 | **0.998** | 0.985 | 0.990 | **1.000** | 0.995 ± 0.001 |
-| rocky | No | **0.045** ± 0.002 | **0.932** | 0.923 | **0.927** | **0.994** | 0.992 | **0.993** | **0.999** | 0.999 | **0.999** ± 0.001 |
-| | Sì | 0.046 ± 0.004 | 0.891 | **0.954** | 0.921 | 0.967 | **0.997** | 0.982 | 0.990 | **1.000** | 0.995 ± 0.001 |
-| sand_ripples | No | 0.049 ± 0.002 | **0.931** | 0.948 | 0.939 | **0.990** | 0.999 | **0.994** | **0.998** | **1.000** | **0.999** ± 0.001 |
-| | Sì | **0.043** ± 0.000 | 0.917 | **0.965** | **0.940** | 0.977 | **1.000** | 0.988 | 0.990 | **1.000** | 0.995 ± 0.000 |
-| slope | No | 0.052 ± 0.010 | **0.950** | 0.949 | **0.949** | **0.995** | 0.987 | **0.991** | **0.999** | 0.990 | **0.995** ± 0.006 |
-| | Sì | **0.043** ± 0.005 | 0.928 | **0.966** | 0.947 | 0.978 | **0.992** | 0.985 | 0.991 | **0.995** | 0.993 ± 0.003 |
+### Evaluation metrics
 
-### PPSurf: effetto della sliding window
+For each terrain and method, `evaluate.py` samples **100 000 points** uniformly
+on the reconstructed mesh and as many on the ground-truth seabed
+(`evaluation.n_campioni`). It then computes the exact point-to-surface
+distance in both directions.
 
-| Fondale | SW | Chamfer ↓ | Prec. τ=0.1 | Rich. τ=0.1 | F τ=0.1 | Prec. τ=0.2 | Rich. τ=0.2 | F τ=0.2 | Prec. τ=0.5 | Rich. τ=0.5 | F τ=0.5 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| flat_sand | No | 0.367 ± 0.019 | 0.027 | 0.051 | 0.036 | 0.107 | 0.200 | 0.140 | 0.678 | 0.961 | 0.792 ± 0.053 |
-| | Sì | **0.111** ± 0.003 | **0.399** | **0.787** | **0.530** | **0.750** | **0.971** | **0.846** | **0.979** | **0.996** | **0.987** ± 0.005 |
-| mixed | No | 0.282 ± 0.006 | 0.176 | 0.300 | 0.221 | 0.351 | 0.589 | 0.439 | 0.725 | 0.952 | 0.823 ± 0.009 |
-| | Sì | **0.118** ± 0.002 | **0.369** | **0.722** | **0.488** | **0.721** | **0.969** | **0.827** | **0.976** | **0.998** | **0.987** ± 0.003 |
-| ridges | No | 0.259 ± 0.007 | 0.254 | 0.439 | 0.322 | 0.428 | 0.724 | 0.538 | 0.697 | 0.971 | 0.811 ± 0.008 |
-| | Sì | **0.115** ± 0.002 | **0.390** | **0.717** | **0.505** | **0.774** | **0.967** | **0.860** | **0.973** | **0.997** | **0.985** ± 0.006 |
-| rocky | No | 0.271 ± 0.007 | 0.202 | 0.350 | 0.256 | 0.368 | 0.631 | 0.465 | 0.704 | 0.973 | 0.817 ± 0.008 |
-| | Sì | **0.119** ± 0.003 | **0.357** | **0.712** | **0.476** | **0.675** | **0.972** | **0.797** | **0.982** | **0.999** | **0.991** ± 0.004 |
-| sand_ripples | No | 0.326 ± 0.013 | 0.051 | 0.089 | 0.065 | 0.175 | 0.296 | 0.220 | 0.821 | 0.917 | 0.864 ± 0.035 |
-| | Sì | **0.114** ± 0.002 | **0.363** | **0.716** | **0.481** | **0.751** | **0.960** | **0.843** | **0.989** | **0.996** | **0.992** ± 0.002 |
-| slope | No | 0.329 ± 0.031 | 0.079 | 0.143 | 0.102 | 0.216 | 0.381 | 0.276 | 0.732 | 0.947 | 0.825 ± 0.033 |
-| | Sì | **0.128** ± 0.017 | **0.347** | **0.679** | **0.459** | **0.753** | **0.941** | **0.837** | **0.986** | **0.984** | **0.985** ± 0.012 |
+| Metric | CSV column | Definition | What it measures |
+|---|---|---|---|
+| Precision | `precisione` | fraction of reconstruction points within τ of the seabed | spurious surface (double shell, "tents" at the borders) |
+| Recall | `richiamo` | fraction of seabed points within τ of the reconstruction | holes |
+| F-score | `fscore` | harmonic mean of precision and recall | summary at threshold τ |
+| Chamfer | `chamfer` | (mean reconstruction→seabed + mean seabed→reconstruction) / 2, in metres | mean error, no threshold |
+| Median, IQR, p95 | `rec2gt_*`, `gt2rec_*` | per direction: `rec2gt` = reconstruction→seabed, `gt2rec` = seabed→reconstruction | error distribution: the median is the typical error, the IQR (p75 − p25) the spread, the p95 the tail |
 
-### Dimensione della finestra e buchi di PPSurf
+The default threshold is τ = 0.5 m (`evaluation.tau`), equal to the voxel size
+of the preprocessing.
 
-Con finestre da 300 ping (~50 m, run sul portatile,
-`PPSURF_2026-11-10_23-40-13_test+val_sw`, 2 terreni per famiglia) PPSurf + SW
-lasciava molti buchi sui fondali lisci. Dimezzando la finestra i buchi
-spariscono:
+The metrics are computed against the **seabed only**, not against the whole
+ground truth. The ground truth is a closed block: walls and bottom only close
+it and the sonar never sees them. `top_surface` (`utils/mesh.py`) separates
+the seabed from them. Against the whole block, spurious surface running down
+the walls would count as correct; against the seabed alone it is penalised.
 
-| Richiamo τ=0.5 (PPSurf + SW) | flat_sand | mixed | ridges | rocky | sand_ripples | slope |
-|---|---|---|---|---|---|---|
-| finestre da 300 ping | 0.799 | 0.946 | 0.919 | 0.986 | 0.845 | 0.858 |
-| finestre da 150 ping | **0.996** | **0.998** | **0.997** | **0.999** | **0.996** | **0.984** |
+### Run output
 
-Altre prove fatte su `flat_sand_012` e altri terreni `*_012` prima di
-scegliere:
+Each call of `evaluate.py` creates a new folder
+`output/evaluation/<date_time>_<split>[_sw]/` (for example
+`2026-11-13_01-11-45_test+val_sw/`) containing everything about that run and
+nothing else:
 
-- **Griglia 193 invece di 129** (finestre da 300 ping): richiamo +2.5/+5
-  punti su `mixed` e `ridges`, tempo ×2.3, e `flat_sand_012` in timeout. La
-  cella di marching cubes non era la causa principale.
-- **Sovrapposizione 30 invece di 60** (finestre da 300 ping): nessun effetto
-  (richiamo 0.839 → 0.843).
-- **Finestre da 150 ping**: richiamo τ=0.2 0.70 → 0.98, p95 fondale→mesh
-  1.22 → 0.16 m. Negli screenshot restano pochi buchi piccoli, ~2% della
-  superficie.
+| File | Content |
+|---|---|
+| `config.txt` | the command, the effective config (with command-line overrides applied), machine (CPU, GPU, versions) and git commit |
+| `git_diff.patch` | only if there were uncommitted changes: their diff |
+| `log.txt` | full terminal output, including subprocesses |
+| `metriche_per_terreno.csv` | one row per (terrain, method): metrics, time, RAM and VRAM peak (`ram_picco_mb`, `vram_picco_mb`), errors (`errore`) |
+| `metriche_per_famiglia.csv` | means per (family, method), with standard deviation across terrains for Chamfer, precision, recall and F-score (`*_std`) |
+| `finestre.csv` | SW only: one row per window (see [Real-time metrics](#real-time-metrics)) |
+| `meshes/<id>_<method>[_sw].ply` | reconstructed meshes |
+| `distanze/<id>_<method>[_sw]_{rec2gt,gt2rec}.npy` | raw distance vectors ("distances"), float32, 100 000 values each |
+| `metriche_tau.csv`, `metriche_tau_per_famiglia.csv` | written by `--ricalcola` (see [Usage](#usage)): metrics at several τ, per terrain and per family (mean ± std) |
+| `screenshots/` | written by `visualization/screenshot_run.py` |
 
-Il limite di PPSurf dipende quindi dall'estensione della scena che riceve,
-non dalla griglia: è lo stesso effetto visto con le porzioni da 25 m nel
-benchmark (test 5).
+## Usage
 
-### Tempi
+Run everything from the repository root, with the `ricostruzione3d`
+environment active:
 
-Poisson e PPSurf senza SW: tempo di ricostruzione per terreno. Con SW: budget
-~20 s per finestra (120 ping nuovi a 6 ping/s), RTF = latenza / budget.
-Intervalli dalla famiglia migliore alla peggiore.
+```bash
+source env_setup.sh
+```
 
-| Metodo | Tempo per terreno | Latenza mediana | Latenza max | RTF mediano | RTF max | Finestre in tempo | VRAM |
+**Full evaluation** on `test+val` (30 terrains). The results below were
+produced with one run per configuration:
+
+```bash
+python evaluate.py --methods poisson --split test+val
+python evaluate.py --methods ppsurf  --split test+val --set ppsurf.rec_batch_size=50000
+python evaluate.py --methods poisson --split test+val --sliding_window on
+python evaluate.py --methods ppsurf  --split test+val --sliding_window on --set ppsurf.rec_batch_size=50000
+```
+
+| Option | Meaning |
+|---|---|
+| `--split {train,val,test,test+val}` | data split; default from `evaluation.split` (`test+val`) |
+| `--methods poisson ppsurf` | methods to run, in sequence on each terrain; default both |
+| `--limit N` | the first N terrains **of each family** (alphabetical order), not N in total |
+| `--sliding_window {on,off}` | overrides `sliding_window.abilitato` |
+| `--set SECTION.KEY=VALUE ...` | overrides any config value for this run, e.g. `--set ppsurf.gen_refine_iter=5 poisson.profondita=8`; repeatable |
+| `--tau T` | threshold in metres; several values only with `--ricalcola` |
+| `--ricalcola RUN_FOLDER` | "recompute": no reconstruction, recomputes Chamfer, precision, recall and F-score for each `--tau` from the raw distances of an existing run |
+
+Without arguments, `evaluate.py` uses the defaults of the `evaluation` section
+of the config (`test+val`, all terrains, Poisson and PPSurf, full scan).
+
+**Quick check**, one terrain per family:
+
+```bash
+python evaluate.py --split val --limit 1 --methods poisson
+```
+
+**Metrics at other thresholds**, without reconstructing:
+
+```bash
+python evaluate.py --ricalcola output/evaluation/<run> --tau 0.1 0.2 0.5
+```
+
+**Screenshots** of every mesh of one or more runs, with the same camera for
+the same terrain across runs (written to `<run>/screenshots/`):
+
+```bash
+python visualization/screenshot_run.py output/evaluation/<run1> output/evaluation/<run2>
+python visualization/screenshot_run.py --ground_truth --dati data/synthetic/test+val   # ground truth only
+```
+
+**Interactive viewer** for one mesh (the path is set in `PERCORSO_MESH` at the
+top of the file):
+
+```bash
+python visualization/visualize_mesh.py
+```
+
+## Results
+
+### Setup
+
+- **Data**: `test+val`, 30 terrains, 5 per family.
+- **Sliding window**: windows of 150 pings with a 30-ping overlap (~25 m of
+  track, ~20 s of budget per window).
+- **Crop**: triangles more than 1 m from the points are removed, in both
+  modes.
+- **PPSurf**: default config (grid 129, test-time augmentation and refinement
+  iterations 3/3) with `ppsurf.rec_batch_size=50000`, which changes only speed
+  and memory.
+- **Hardware**: NVIDIA GTX TITAN X, 12 GB.
+- **Thresholds**: τ = 0.1, 0.2 and 0.5 m; the values at 0.1 and 0.2 are
+  recomputed with `--ricalcola`.
+- **Full tables**: precision, recall and F-score at each τ, mean ± std per
+  family, are in `metriche_tau_per_famiglia.csv` of the four runs.
+
+| Configuration | Run folder |
+|---|---|
+| Poisson | `output/evaluation/2026-11-13_00-17-36_test+val` |
+| PPSurf | `output/evaluation/2026-11-13_00-21-04_test+val` |
+| Poisson + SW | `output/evaluation/2026-11-13_00-44-19_test+val_sw` |
+| PPSurf + SW | `output/evaluation/2026-11-13_01-11-45_test+val_sw` |
+
+### Accuracy
+
+![Chamfer per seabed family: Poisson and PPSurf, with and without SW](imgs/chamfer_per_fondale.png)
+
+Chamfer distance per family, mean ± std over the 5 terrains, log scale.
+
+F-score per configuration (range across families):
+
+| | F τ=0.1 | F τ=0.2 | F τ=0.5 |
+|---|---|---|---|
+| Poisson | 0.93–0.97 | 0.99–1.00 | 0.995–0.999 |
+| Poisson + SW | 0.92–0.95 | 0.98–0.99 | 0.993–0.995 |
+| PPSurf | 0.04–0.32 | 0.14–0.54 | 0.79–0.86 |
+| PPSurf + SW | 0.46–0.53 | 0.80–0.86 | 0.985–0.992 |
+
+![Precision, recall and F-score as a function of τ](imgs/metriche_tau.png)
+
+Line = mean across families, band = min–max across families. PPSurf + SW
+reaches Poisson at τ = 0.5; below that, its limit is precision (the double
+shell), not recall.
+
+Both plots are generated with:
+
+```bash
+python visualization/plot_chamfer.py \
+    --poisson    output/evaluation/2026-11-13_00-17-36_test+val \
+    --ppsurf     output/evaluation/2026-11-13_00-21-04_test+val \
+    --poisson_sw output/evaluation/2026-11-13_00-44-19_test+val_sw \
+    --ppsurf_sw  output/evaluation/2026-11-13_01-11-45_test+val_sw
+python visualization/plot_tau.py    # same four arguments
+```
+
+`plot_tau.py` uses the τ values present in `metriche_tau_per_famiglia.csv`;
+run `--ricalcola` with more values for a finer curve.
+
+### Timing
+
+Without SW: reconstruction time per terrain. With SW: budget ~20 s per window
+(120 new pings at 6 pings/s), RTF = latency / budget. Ranges go from the best
+to the worst family.
+
+| Method | Time per terrain | Median latency | Max latency | Median RTF | Max RTF | Windows in time | VRAM |
 |---|---|---|---|---|---|---|---|
 | Poisson | 2.2–4.3 s | – | – | – | – | – | – |
 | PPSurf | 38–43 s | – | – | – | – | – | 8.7 GB |
 | Poisson + SW | 42–47 s | 1.6–1.7 s | 2.5–2.7 s | 0.08–0.09 | 0.12–0.14 | 100% | – |
 | PPSurf + SW | 950–1140 s | 36–41 s | 47–57 s | 1.8–2.1 | 2.6–3.2 | 0% | 8.6 GB |
 
-La VRAM di PPSurf è alta per via di `rec_batch_size=50000`; con 10000 (il
-default del config, per i 4 GB del portatile) scende a ~1.9 GB.
+PPSurf's VRAM is high because of `rec_batch_size=50000`; with 10000 (the
+config default, sized for a 4 GB GPU) it drops to ~1.9 GB.
 
-### Discussione
+![Real-time factor per window: Poisson + SW and PPSurf + SW](imgs/rtf_finestre.png)
 
-**Poisson**
-- La SW non costa qualità: Chamfer 0.04–0.05 m e F τ=0.5 ≥ 0.99 in entrambi i
-  modi, std ≤ 0.01.
-- Con la SW la mesh è più fine, perché la profondità dell'octree è relativa
-  alla finestra: il richiamo a τ=0.1 sale (0.92–0.97 → 0.95–0.98) e il
-  Chamfer migliora su 4 famiglie su 6.
-- La precisione scende dell'1–4% a τ ≤ 0.2: resta un po' di superficie spuria
-  entro 1 m, cioè resti della cupola vicino ai punti e doppi strati dove le
-  passate si sovrappongono.
-- È ampiamente in tempo reale (RTF 0.08, tutte le finestre in tempo):
-  **pronto per l'uso online**.
-
-**PPSurf**
-- La SW migliora tutto, su tutte le famiglie: Chamfer da 0.26–0.37 a
-  0.11–0.13 m (−55/−70%), F τ=0.5 da 0.79–0.86 a 0.985–0.992, F τ=0.2 da
-  0.14–0.54 a 0.80–0.86.
-- A τ=0.5 è quasi alla pari con Poisson (F 0.985–0.992 contro 0.993–0.995).
-- **Sotto i 20 cm resta lontano da Poisson**: F τ=0.1 0.46–0.53 contro
-  0.92–0.95. Il richiamo è buono (~0.97 a τ=0.2), la precisione no (~0.75 a
-  τ=0.2, ~0.38 a τ=0.1): è il guscio doppio, due strati a ~10–15 cm sopra e
-  sotto il fondale.
-- **Non è in tempo reale**, nemmeno sulla TITAN X: RTF mediano ~1.9, nessuna
-  finestra in tempo. Ogni chiamata costa ~35–40 s indipendentemente dalla
-  dimensione della finestra (lo fissano griglia e TTA), e finestre più piccole
-  dimezzano il budget.
-
-**Prossimi passi**
-1. PPSurf + SW, precisione a τ piccoli: tenere un solo strato del guscio
-   (strato medio, come in `strato_singolo_ppsurf.py`).
-2. PPSurf + SW, tempo: griglia più grossa sulle finestre piccole (97: cella
-   ~0.26 m), meno TTA, o più finestre per chiamata con il modello caricato
-   una volta.
-3. Poisson + SW: deduplicare le zone dove le passate si sovrappongono.
-
-## La cartella benchmark: esperimenti fatti e risultati
-
-Gli script di `benchmark/` sono esperimenti mirati, fatti per rispondere a
-domande precise su costi e qualità. Si lanciano tutti dalla root del
-progetto e scrivono in `benchmark/benchmark_output/`, una cartella ignorata da
-git: i risultati sono riportati qui sotto. Salvo dove indicato, le metriche
-sono le stesse di `evaluate.py` (contro il fondale, τ = 0.5 m).
-
-| Script | Domanda | Output |
-|---|---|---|
-| `tempo_poisson.sh`, `tempo_ppsurf.sh` | Quanto costa ogni fase di ciascun metodo? | `tempi.csv`, `poisson/`, `ppsurf/` |
-| `sweep_densita_poisson.py` | Qual è la soglia giusta per il taglio per densità di Poisson? | `sweep_densita_poisson.csv` |
-| `strato_singolo_ppsurf.py` | Quanto pesa il guscio doppio di PPSurf? | `strato_singolo_ppsurf.csv`, `ppsurf_strato_singolo/` |
-| `crop_ppsurf.py` | Il limite di PPSurf è la griglia o il modello? | `crop_ppsurf*.csv`, `ppsurf_crop/` |
-| `tile_ppsurf.py` | PPSurf a porzioni arriva al livello di Poisson? | `tile_ppsurf.csv`, `ppsurf_tile/` |
-| `comune.sh`, `prepara_input.py`, `poisson_fasi.py`, `metriche_superficie.py` | funzioni di supporto per gli script dei tempi | – |
-
-### 1. Tempi per fase (`tempo_*.sh`)
+RTF of each window along the track, log scale. Line = median across the 30
+terrains, band = 10th–90th percentile. Poisson stays an order of magnitude
+below RTF = 1; PPSurf is above it in every window. Every fifth PPSurf window is
+faster (latency ~24 s instead of ~38 s); the period matches 5 × 120 new pings,
+so these are probably the windows that contain a turn of the survey path. This
+has not been verified. Generated with:
 
 ```bash
-bash benchmark/tempo_poisson.sh data/synthetic/val/flat_sand_012/flat_sand_012_scan.csv 3
-bash benchmark/tempo_ppsurf.sh  data/synthetic/val/flat_sand_012/flat_sand_012_scan.csv 3
+python visualization/plot_rtf.py \
+    --poisson_sw output/evaluation/2026-11-13_00-44-19_test+val_sw \
+    --ppsurf_sw  output/evaluation/2026-11-13_01-11-45_test+val_sw
 ```
 
-`prepara_input.py` esegue il preprocessing una volta sola, fuori dal
-cronometro. Poi ogni fase del metodo viene cronometrata con picco di RAM e
-VRAM. Per PPSurf, `avvio_librerie` misura il solo costo fisso di avvio
-(Python, PyTorch, CUDA) e `rec` la ricostruzione completa. Su `flat_sand_012`
-(77 702 punti dopo il preprocessing), GTX 1650 da 4 GB, 3 ripetizioni:
+Why the windows are 150 pings and not 300: see
+[ANALYSIS.md](ANALYSIS.md#dimensione-della-finestra-e-buchi-di-ppsurf).
 
-| Metodo | Fase | Tempo | RAM picco | VRAM picco |
-|---|---|---|---|---|
-| Poisson | ricostruzione (octree depth 9) | 5–12 s | ~470 MB | – |
-| Poisson | processo completo (avvio + normali + ricostruzione + pulizia) | 9–16 s | ~470 MB | – |
-| PPSurf | avvio librerie + CUDA | 4–10 s | ~690 MB | – |
-| PPSurf | `pps.py rec` completo | ~170 s | ~1.6 GB | ~1.9 GB |
+### Discussion
 
-PPSurf costa circa 15–20 volte Poisson, e il suo tempo dipende dalla griglia
-di marching cubes, non dal numero di punti. In `tempi.csv` ci sono anche
-Chamfer e F-score di queste run, ma sono precedenti al fix delle normali di
-Poisson: per la qualità valgono le tabelle seguenti.
+**Poisson**
+- The sliding window costs no accuracy: Chamfer 0.04–0.05 m and F τ=0.5 ≥ 0.99
+  in both modes, std ≤ 0.01.
+- With SW the mesh is finer, because the octree depth is relative to the
+  window: recall at τ=0.1 rises (0.92–0.97 → 0.95–0.98) and Chamfer improves
+  on 4 families out of 6.
+- Precision drops by 1–4% at τ ≤ 0.2: some spurious surface remains within
+  1 m, i.e. remnants of the dome near the points and double layers where
+  adjacent survey lines overlap.
+- It is comfortably real-time (RTF 0.08, all windows in time): **ready for
+  online use**.
 
-### 2. Soglia del taglio per densità di Poisson (`sweep_densita_poisson.py`)
+**PPSurf**
+- The sliding window improves every metric on every family: Chamfer from
+  0.26–0.37 to 0.11–0.13 m (−55/−70%), F τ=0.5 from 0.79–0.86 to
+  0.985–0.992, F τ=0.2 from 0.14–0.54 to 0.80–0.86.
+- At τ=0.5 it is almost on par with Poisson (F 0.985–0.992 against
+  0.993–0.995).
+- **Below 20 cm it stays far from Poisson**: F τ=0.1 0.46–0.53 against
+  0.92–0.95. Recall is good (~0.97 at τ=0.2), precision is not (~0.75 at
+  τ=0.2, ~0.38 at τ=0.1): this is the double shell, two layers ~10–15 cm
+  above and below the seabed.
+- **It is not real-time**, not even on the TITAN X: median RTF ~1.9, no
+  window in time. Each call costs ~35–40 s regardless of the window size
+  (grid and test-time augmentation set the cost), and smaller windows halve
+  the budget.
 
-Poisson viene eseguito una volta per terreno. Poi la mesh grezza viene
-tagliata a diversi quantili di densità e ognuno viene misurato. Prova su
-6 terreni val, 1 per famiglia:
+## Next steps
 
-| Quantile | 0.0 | 0.02 | 0.03 | **0.05** | 0.07 | 0.1 | 0.2 | 0.35 |
-|---|---|---|---|---|---|---|---|---|
-| F-score medio | 0.903 | 0.976 | 0.990 | **0.998** | 0.995 | 0.984 | 0.936 | 0.820 |
-| Chamfer medio | 0.34 m | 0.08 m | 0.06 m | **0.05 m** | 0.05 m | 0.07 m | 0.13 m | 0.30 m |
+1. **PPSurf + SW, precision at small τ**: keep a single layer of the shell
+   (the middle layer, as in `benchmark/strato_singolo_ppsurf.py`).
+2. **PPSurf + SW, time**: a coarser grid on the small windows (97: cell
+   ~0.26 m), less test-time augmentation, or several windows per call with the
+   model loaded once.
+3. **Poisson + SW**: deduplicate the areas where adjacent survey lines
+   overlap.
 
-Il massimo a 0.05 è netto ed è il valore in config. Senza taglio restano le
-"tende" spurie ai bordi; tagliando troppo si aprono buchi.
+## Technical notes
 
-Prima di questo sweep le normali erano stimate con un raggio fisso di 0.1 m.
-Dopo il voxel da 0.5 m nessun punto aveva vicini entro quel raggio, quindi
-tutte le normali restavano (0,0,1). Ora `stima_normali` usa i 30 vicini più
-prossimi.
-
-### 3. Il guscio doppio di PPSurf (`strato_singolo_ppsurf.py`)
-
-PPSurf, pre-addestrato su oggetti chiusi, avvolge il fondale aperto in un
-solido sottile: quasi ogni raggio verticale attraversa **due** superfici, una
-sopra e una sotto il fondale vero, distanti circa 1 m. Lo script lavora sulle
-mesh già salvate da `evaluate.py`, senza GPU. Su una griglia XZ di 0.25 m
-prende il primo hit dall'alto (strato alto), il primo dal basso (strato basso)
-e il punto medio fra i due. Media sui 6 terreni `*_012`:
-
-| Variante | Chamfer | Precisione | Richiamo | F-score |
-|---|---|---|---|---|
-| PPSurf originale | 0.344 m | 0.67 | 0.96 | 0.79 |
-| strato alto | 0.548 m | 0.52 | 0.52 | 0.52 |
-| strato basso | 0.374 m | 0.80 | 0.75 | 0.77 |
-| strato medio | 0.262 m | 0.91 | 0.86 | 0.88 |
-| Poisson | 0.048 m | 1.00 | 1.00 | 1.00 |
-
-Il guscio spiega una parte dell'errore, non tutto: anche il punto medio resta
-più di 5 volte peggio di Poisson. Usare l'input senza downsampling (250k
-punti) non cambia nulla: Chamfer 0.42 contro 0.46 m su `flat_sand_012`.
-
-### 4. Griglia o modello? (`crop_ppsurf.py`)
-
-Con `gen_resolution_global: 129` su un terreno da 100 m le celle di marching
-cubes sono di ~0.8 m, contro ~0.2 m di Poisson. Lo script rilancia PPSurf su
-un ritaglio di 25×25 m, dove con la stessa griglia le celle diventano ~0.2 m.
-Poi misura tutte le varianti sul quadrato interno di 20 m. Chamfer in metri:
-
-| Terreno | Completo | Completo, strato medio | Ritaglio | **Ritaglio, strato medio** | Poisson |
-|---|---|---|---|---|---|
-| flat_sand_012 | 0.454 | 0.301 | 0.113 | **0.035** | 0.039 |
-| ridges_012 | 0.302 | 0.325 | 0.107 | **0.054** | 0.031 |
-| rocky_012 | 0.292 | 0.326 | 0.111 | **0.093** | 0.047 |
-| **Media** | 0.349 | 0.317 | 0.110 | **0.061** | 0.039 |
-
-Sul ritaglio il guscio scende da 0.9–1.2 m a 0.25–0.34 m, e con lo strato
-medio PPSurf arriva al livello di Poisson. Il ritaglio però riduce insieme la
-cella e l'estensione della scena, quindi questo test da solo non dice quale
-delle due conta.
-
-**Il test che separa i due effetti**: griglia più fine sull'intero terreno
-(GTX TITAN X da 12 GB, split val, 1 terreno per famiglia):
-
-| `gen_resolution_global` | Cella su 100 m | Chamfer | F-score | Tempo/terreno |
-|---|---|---|---|---|
-| 129 | ~0.8 m | 0.360 m | 0.779 | ~46 s |
-| 257 (default del paper) | ~0.4 m | 0.363 m | 0.782 | ~187 s |
-| 519 | ~0.2 m | 0.354 m | 0.786 | ~918 s |
-
-Risoluzione ×4, tempo ×20, nessun miglioramento: le differenze sono nel
-rumore tra run (~0.015 m). A 519 il guscio resta di 0.8–0.9 m. **Lo spessore
-del guscio è circa l'1% del lato della scena** (100 m → ~0.9 m, 25 m →
-~0.3 m), qualunque sia la griglia. Questo è coerente con la normalizzazione
-di PPSurf, che porta ogni point cloud nel cubo unitario: il guscio ha uno
-spessore fisso in coordinate normalizzate. Il limite è quindi nel campo
-predetto dalla rete, non nella discretizzazione.
-
-### 5. PPSurf a porzioni (`tile_ppsurf.py`)
-
-Applica la conclusione precedente a tutto il terreno. Il terreno viene diviso
-in quadrati da 25 m (nucleo di 20 m + 2.5 m di margine per lato, scartato
-nell'unione). Tutti i quadrati passano in un solo sottoprocesso PPSurf
-(modalità dataset, modello caricato una volta) e vengono riuniti in due modi:
-`tile_originale` (mesh ritagliate sui nuclei) e `tile_medio` (strato medio su
-una griglia globale). Griglia 129 per quadrato, 25 quadrati per terreno,
-terreni `*_012`, TITAN X:
-
-| Variante | Chamfer | Precisione | Richiamo | F-score | Spessore del guscio |
-|---|---|---|---|---|---|
-| PPSurf sull'intero terreno | 0.344 m | 0.67 | 0.96 | 0.79 | ~1.0 m |
-| PPSurf sull'intero terreno, strato medio | 0.262 m | 0.91 | 0.86 | 0.88 | ~1.0 m |
-| **a porzioni, originale** | **0.121 m** | 0.98 | 0.99 | **0.99** | 0.28 m |
-| **a porzioni, strato medio** | **0.086 m** | 0.99 | 0.99 | **0.99** | 0.28 m |
-| Poisson | 0.048 m | 1.00 | 1.00 | 1.00 | – |
-
-A τ = 0.5 m PPSurf a porzioni è alla pari con Poisson. Il Chamfer resta circa
-1.8 volte quello di Poisson, ma tutto lo scarto sta sotto la soglia. Lo strato
-medio aggiunge poco ed essendo 2.5D cancella tubi e piloni: `tile_originale`
-è la variante da tenere.
-
-**Il costo resta l'ostacolo**: ~17 min per terreno (~41 s per quadrato,
-fissati dalla griglia) contro ~7 s di Poisson, circa 150 volte tanto.
-
-## Perché PPSurf è configurato così
-
-- **Perché PPSurf e non un altro metodo neurale.** È patch-based: ricostruisce
-  porzione per porzione invece di deformare una forma globale, quindi si adatta
-  a superfici aperte e allungate come una scansione multibeam. Gli altri
-  candidati sono stati scartati (vedi [Metodi scartati](#metodi-scartati)).
-  SA-ConvONet, l'ultimo rimasto in gara, andava peggio di PPSurf (F-score ~0.59
-  contro ~0.70 su `flat_sand_012`). La sua variante con adattamento per scena
-  era infattibile: ~1.5 h per terreno, e va in OOM su 4 GB.
-- **`gen_resolution_global: 129`** (default 257): su 4 GB di VRAM il default va
-  in OOM. Sulla TITAN X da 12 GB, 257 e 519 non migliorano la qualità (test 4)
-  e costano 4 e 20 volte di più. Non c'è motivo di alzarla.
-- **`rec_batch_size: 10000`** (default 50000): serve solo a stare nei 4 GB
-  durante il marching cubes. Non cambia il risultato.
-- **`gen_subsample_manifold_iter: 3` e `gen_refine_iter: 3`** (default 10 e
-  10): circa un terzo del tempo in meno, a qualità invariata o leggermente
-  migliore.
-  - Il primo parametro è la *test-time augmentation*: la parte globale della
-    rete viene ripetuta su sottoinsiemi dei punti, finché ogni punto è stato
-    usato tante volte quanto il valore impostato.
-  - Il secondo è il numero di iterazioni con cui PPSurf raffina le intersezioni
-    di marching cubes.
-
-  Prove sui 6 terreni `*_012`, senza SW, GTX 1650 (con `evaluate.py --set`):
-
-  | TTA / refine | Tempo per terreno | F τ=0.1 | F τ=0.2 | F τ=0.5 |
-  |---|---|---|---|---|
-  | 10 / 10 (default) | 176 s | 0.151 | 0.315 | 0.801 |
-  | 5 / 10 | 167 s | – | – | 0.808 |
-  | 3 / 10 | 164 s | – | – | 0.818 |
-  | 10 / 5 | 133 s | 0.151 | 0.314 | 0.806 |
-  | 10 / 3 | 119 s | 0.149 | 0.313 | 0.801 |
-  | **3 / 3** | **112 s** | **0.169** | **0.351** | **0.817** |
-
-  La leva vera è il raffinamento: posizionare meglio la superficie dentro la
-  cella non serve, se la superficie è comunque spostata di 20–50 cm per il
-  guscio doppio. La test-time augmentation pesa poco sul tempo, e ridurla ha
-  migliorato un po' la qualità due volte su due. Un'ipotesi: mediando meno, il
-  guscio è meno regolare e tocca più spesso il fondale vero. Non è verificata,
-  e la prova è su soli 6 terreni.
-
-  I circa 110 s che restano sono il costo dell'inferenza della rete sui punti
-  della griglia vicini alla superficie. PPSurf non valuta tutto il cubo: usa un
-  marching cubes a *region growing* che parte dai punti di input (paper,
-  sez. 3.3).
-- **Stesso preprocessing di Poisson** (voxel 0.5 m + outlier): togliere il
-  downsampling non cambia la qualità e allunga i tempi (test 3).
-  `max_punti: 250000` è solo un limite di sicurezza.
-- **Niente strato medio nella pipeline**: migliora un po' il Chamfer ma è
-  2.5D, quindi cancella proprio le strutture (tubi, piloni) dove un metodo
-  neurale potrebbe battere Poisson.
-- **Scene piccole invece di griglie fini**: poiché il guscio scala con
-  l'estensione della scena (test 4 e 5), la leva giusta è ricostruire scene più
-  piccole. A porzioni funziona ma costa troppo. La sliding window produce
-  scene piccole per costruzione, e ne eredita il beneficio: F τ=0.2 da
-  0.08–0.52 a 0.70–0.77 (vedi [Risultati](#risultati-poisson-e-ppsurf-con-e-senza-sw)).
-- **Prossimi passi possibili**: tenere il modello caricato tra una finestra e
-  l'altra della sliding window (5–10 s risparmiati a finestra), oppure un
-  fine-tuning su superfici aperte, che attacca la causa del guscio. Gli autori
-  stessi definiscono i tempi di ricostruzione *"non-interactive"* (paper,
-  sez. 4.3).
-
-## Metodi scartati
-
-| Metodo | Motivo |
-|---|---|
-| Point2Mesh | Parte da un convex hull, pensato per forme compatte di genere 0. Sul nastro di scansione più iterazioni peggiorano la fedeltà. 1000 s per un risultato 3.5 volte peggio di Poisson. |
-| SA-ConvONet | Sui sintetici era peggio di PPSurf. L'ottimizzazione per scena (la parte "SA") richiede ~1.5 h per terreno e va in OOM su 4 GB. Dipendenze ferme a PyTorch 1.4 / CUDA 10.1. Rimosso dal codice, recuperabile dalla history git. |
-| NKSR | Wheel non più disponibili, va compilato con CUDA 12.8; probabile OOM su 4 GB. |
-| DeepSDF, if-net | Richiedono un training su un dataset di forme (prior di forma); i pesi disponibili sono su ShapeNet. |
-| NeuS, 3DGS | Richiedono immagini RGB multi-vista, mentre il progetto resta sul sonar. |
-| PointNet++, DGCNN | Estrattori di feature, non producono mesh. |
-| Metodi a diffusione (WALA, Make-A-Shape) | Immaturi su input sparsi e rumorosi, addestrati su oggetti e non su scene. |
-
-## Note tecniche
-
-- **PPSurf su 4 GB di VRAM**: servono
-  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, griglia 129 e batch
-  10000 (già impostati da `scripts/ppsurf.py` e dal config). Per trimesh ≥ 5
-  va applicato il fix in `source/base/mesh.py` descritto in [SETUP.md](SETUP.md).
-- **GPU Maxwell (TITAN X)**: non aggiornare PyTorch a ≥ 2.8 nell'ambiente
-  `pps`.
-- **Visualizzatore Open3D su WSLg**: GLFW tenta Wayland e la finestra non
-  compare. `visualize_mesh.py` forza X11; per gli altri script basta
-  `source env_setup.sh`.
-- **matplotlib senza display**: `matplotlib.use("Agg")` va chiamato **prima**
-  di importare `pyplot`, altrimenti un backend interattivo può andare in crash
-  anche solo salvando un file.
-- **Formato Omniscan 3D** (dati reali, via SonarView): CSV con
-  `easting/northing`, `altitude`, `power (dB)`, `classification` e
-  `ping number`. Il sensore non ha RGB. La classe 2 è probabilmente colonna
-  d'acqua. I filtri per i dati reali (classi, quota, zone escluse) sono ancora
-  supportati da `utils/pipeline.py`, ma non sono più nel config: vanno
-  aggiunti sotto `preprocessing` (`escludi_classi`, `altitude_min`, …) se si
-  torna sui dati reali.
-- **WSL e spazio disco**: il `.vhdx` cresce ma non si restringe da solo. Per
-  compattarlo: `wsl --shutdown`, poi `Optimize-VHD` o `diskpart compact vdisk`.
+- **Distance crop in SW mode.** In the sliding window, the 1 m crop is
+  measured from the window's points after voxel downsampling but **before**
+  outlier removal; in full-scan mode it uses the cleaned point cloud. The
+  difference is small at a 1 m threshold, but the two modes are not strictly
+  identical.
+- **Omniscan 3D format** (real data, exported from SonarView): CSV with
+  `easting/northing`, `altitude`, `power (dB)`, `classification` and
+  `ping number`. The sensor has no RGB. Class 2 is probably the water column.
+  The filters for real data (classes, altitude, excluded areas) are still
+  supported by `utils/pipeline.py` but are no longer in the config. To use
+  them, add them under `preprocessing`: `escludi_classi` (classes to exclude),
+  `altitude_min`, `altitude_max` (on the vertical Y axis), and `escludi_zona_x`
+  with `escludi_zona_z` (a rectangle to exclude, `[min, max]` on X and Z; both
+  must be set).
+- **PPSurf memory.** The marching-cubes stage dominates VRAM, regardless of
+  the number of input points. `gen_resolution_global` and `rec_batch_size` set
+  it; see [SETUP.md](SETUP.md#6-configuration-for-low-vram).

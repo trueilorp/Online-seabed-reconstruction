@@ -4,20 +4,16 @@ Valutazione dei metodi di ricostruzione sui terreni sintetici.
 Per ogni terreno in data/synthetic/<split>/<id>/ ricostruisce la mesh da
 <id>_scan.csv con la pipeline di utils/pipeline.py e la confronta con
 <id>_ground_truth.obj:
-  - accuratezza : distanza dei punti campionati sulla mesh ricostruita dalla GT
-  - completezza : distanza dei punti campionati sul fondale GT dalla mesh ricostruita
-  - copertura   : frazione di punti del fondale GT entro --tau dalla mesh ricostruita
   - chamfer     : (distanza media ricostruzione->fondale + fondale->ricostruzione) / 2, in metri
   - precisione  : frazione di punti della ricostruzione entro --tau dal fondale
-  - richiamo    : frazione di punti del fondale entro --tau dalla ricostruzione (= copertura)
+  - richiamo    : frazione di punti del fondale entro --tau dalla ricostruzione
   - fscore      : media armonica di precisione e richiamo
   - rec2gt_*, gt2rec_* : mediana, iqr (p75 - p25) e p95 delle distanze ricostruzione->fondale e
                   fondale->ricostruzione: la media (Chamfer) e' dominata dalle code, queste no
 Con la sliding window, per ogni finestra: latenza, tempo di acquisizione e real-time factor
 (rtf = latenza / tempo tra due finestre consecutive; < 1 = tiene il passo col sonar).
-La GT e' chiusa (pareti e fondo): completezza, copertura, chamfer e F-score usano solo il fondale
-(top_surface), altrimenti pareti e fondo, mai visti dal sonar, peserebbero come mancanti.
-L'accuratezza invece e' misurata contro la GT intera.
+La GT e' chiusa (pareti e fondo): tutte le metriche usano solo il fondale (top_surface),
+altrimenti pareti e fondo, mai visti dal sonar, peserebbero come mancanti.
 
 Percorsi e default (split, limit, metodi, n_campioni, tau) nella sezione "evaluation"
 di config/config.yaml; split, limit, metodi, tau e sliding window sovrascrivibili da riga di comando.
@@ -108,26 +104,20 @@ def riassunto_finestre(finestre: list) -> dict:
 	return riassunto
 
 
-def calcola_metriche(mesh: o3d.geometry.TriangleMesh, gt_mesh: o3d.geometry.TriangleMesh,
-					 fondale: o3d.geometry.TriangleMesh, tau: float, n_campioni: int):
+def calcola_metriche(mesh: o3d.geometry.TriangleMesh, fondale: o3d.geometry.TriangleMesh,
+					 tau: float, n_campioni: int):
 	"""Metriche aggregate + distanze grezze {"rec2gt": ricostruzione->fondale, "gt2rec": fondale->ricostruzione}."""
 	punti_mesh = np.asarray(mesh.sample_points_uniformly(n_campioni).points)
 	punti_fondale = np.asarray(fondale.sample_points_uniformly(n_campioni).points)
 
-	acc = distanze_da_mesh(punti_mesh, gt_mesh)
-	comp = distanze_da_mesh(punti_fondale, mesh)
-	acc_fondale = distanze_da_mesh(punti_mesh, fondale)
+	rec2gt = distanze_da_mesh(punti_mesh, fondale)
+	gt2rec = distanze_da_mesh(punti_fondale, mesh)
 	metriche = {
-		"accuratezza_media": float(acc.mean()),
-		"accuratezza_p90": float(np.percentile(acc, 90)),
-		"completezza_media": float(comp.mean()),
-		"completezza_p90": float(np.percentile(comp, 90)),
-		"copertura": float((comp <= tau).mean()),
-		**metriche_superficie(acc_fondale, comp, tau),
-		**statistiche_distanze(acc_fondale, "rec2gt"),
-		**statistiche_distanze(comp, "gt2rec"),
+		**metriche_superficie(rec2gt, gt2rec, tau),
+		**statistiche_distanze(rec2gt, "rec2gt"),
+		**statistiche_distanze(gt2rec, "gt2rec"),
 	}
-	return metriche, {"rec2gt": acc_fondale, "gt2rec": comp}
+	return metriche, {"rec2gt": rec2gt, "gt2rec": gt2rec}
 
 
 def elenca_terreni(synthetic_dir: str, split: str, famiglie: dict, limit: int = None) -> list:
@@ -209,8 +199,7 @@ def salva_csv(righe: list, cartella_out: str):
 	ok = df[df["errore"].isna()] if "errore" in df else df
 	if ok.empty:
 		return
-	colonne = ["accuratezza_media", "accuratezza_p90", "completezza_media", "completezza_p90",
-			   "copertura", "chamfer", "precisione", "richiamo", "fscore",
+	colonne = ["chamfer", "precisione", "richiamo", "fscore",
 			   "rec2gt_mediana", "rec2gt_iqr", "rec2gt_p95", "gt2rec_mediana", "gt2rec_iqr", "gt2rec_p95",
 			   "n_punti_input", "n_vertici", "tempo_calcolo_secondi", "ram_picco_mb", "vram_picco_mb",
 			   "latenza_mediana_s", "latenza_max_s", "rtf_mediano", "rtf_max", "finestre_in_tempo"]
@@ -368,7 +357,7 @@ def main():
 				mesh_out = os.path.join(cartella_mesh, f"{id_terreno}_{nome}{suffisso}.ply")
 				o3d.io.write_triangle_mesh(mesh_out, mesh)
 
-				metriche, distanze = calcola_metriche(mesh, gt_mesh, fondale, args.tau, ev["n_campioni"])
+				metriche, distanze = calcola_metriche(mesh, fondale, args.tau, ev["n_campioni"])
 				riga.update(metriche)
 				# distanze grezze: altre soglie tau ricalcolabili offline senza rifare la ricostruzione
 				for verso, d in distanze.items():
