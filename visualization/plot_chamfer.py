@@ -70,7 +70,7 @@ def main():
 	ax.yaxis.set_major_locator(FixedLocator(tacche))
 	ax.yaxis.set_minor_locator(NullLocator())
 	ax.set_yticklabels([f"{t:g}" for t in tacche])
-	ax.set_ylabel("Chamfer [m] (più basso è meglio)", color=INCHIOSTRO_2)
+	ax.set_ylabel("Chamfer [m] (lower is better)", color=INCHIOSTRO_2)
 	ax.set_xticks(x, famiglie)
 	ax.grid(axis="y", color=GRIGLIA, linewidth=0.8, zorder=0)
 	for lato in ("top", "right"):

@@ -61,8 +61,8 @@ def main():
 	ax.yaxis.set_major_locator(FixedLocator(tacche))
 	ax.yaxis.set_minor_locator(NullLocator())
 	ax.set_yticklabels([f"{t:g}" for t in tacche])
-	ax.set_xlabel("finestra (ordine di acquisizione)", color=INCHIOSTRO_2)
-	ax.set_ylabel("RTF = latenza / budget", color=INCHIOSTRO_2)
+	ax.set_xlabel("window (acquisition order)", color=INCHIOSTRO_2)
+	ax.set_ylabel("RTF = latency / budget", color=INCHIOSTRO_2)
 	ax.grid(color=GRIGLIA, linewidth=0.8, zorder=0)
 	for lato in ("top", "right"):
 		ax.spines[lato].set_visible(False)

@@ -32,7 +32,7 @@ SERIE = [
 	("ppsurf", "PPSurf", ARANCIO, "-", "o"),
 	("ppsurf_sw", "PPSurf + SW", ARANCIO, "--", "s"),
 ]
-METRICHE = [("precisione", "Precisione"), ("richiamo", "Richiamo"), ("fscore", "F-score")]
+METRICHE = [("precisione", "Precision"), ("richiamo", "Recall"), ("fscore", "F-score")]
 
 
 def leggi(cartella_run: str) -> pd.DataFrame:

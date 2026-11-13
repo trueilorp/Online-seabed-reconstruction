@@ -1,7 +1,8 @@
 # Analisi: esperimenti, scelte dei parametri e metodi scartati
 
 Complemento del [README](README.md): qui c'è il *perché* delle scelte fatte nella
-pipeline. Il README descrive cosa fa il progetto e i risultati finali.
+pipeline. Il README descrive installazione e uso; metodo e risultati finali sono
+nel report, [report.pdf](report.pdf).
 
 ## Indice
 
@@ -239,7 +240,7 @@ fissati dalla griglia) contro ~7 s di Poisson, circa 150 volte tanto.
   piccole. A porzioni funziona ma costa troppo. La sliding window produce
   scene piccole per costruzione, e ne eredita il beneficio: con finestre da 150
   ping F τ=0.2 da 0.14–0.54 a 0.80–0.86 (vedi
-  [Risultati](README.md#risultati-poisson-e-ppsurf-con-e-senza-sw) e
+  [report](report.pdf) e
   [Dimensione della finestra](#dimensione-della-finestra-e-buchi-di-ppsurf)).
 - **Prossimi passi possibili**: tenere il modello caricato tra una finestra e
   l'altra della sliding window (5–10 s risparmiati a finestra), oppure un
