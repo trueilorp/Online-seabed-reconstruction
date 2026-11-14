@@ -1,80 +1,75 @@
+"""Interactive Open3D viewer for one mesh (set MESH_PATH below); press S to save a screenshot."""
+
+import datetime
 import os
 
-# su WSLg GLFW sceglie Wayland: la finestra non compare o GLEW non si inizializza -> forza X11
+# on WSLg GLFW picks Wayland: the window does not appear or GLEW fails -> force X11
 os.environ.pop("WAYLAND_DISPLAY", None)
 os.environ["XDG_SESSION_TYPE"] = "x11"
 
+import numpy as np
 import open3d as o3d
 
-# --- Imposta qui il file da aprire ---
-PERCORSO_MESH = "new_mesh_ppsurf_sw/rocky_012_ppsurf_sw.ply" # "output/mesh/Terrain_unity/mesh_ppsurf.ply"
-MOSTRA_WIREFRAME = False   # True per vedere anche gli spigoli dei triangoli sovrapposti
-CARTELLA_SCREENSHOT = "output/screenshots_mesh"   # cartella dove salvare le immagini (creata se non esiste)
+MESH_PATH = "new_mesh_ppsurf_sw/rocky_012_ppsurf_sw.ply"
+SHOW_WIREFRAME = False
+SCREENSHOT_FOLDER = "output/screenshots_mesh"
 
 
-def visualizza(percorso: str, wireframe: bool = False):
-	import os
-	import datetime
-
-	mesh = o3d.io.read_triangle_mesh(percorso)
-
+def visualize(path: str, wireframe: bool = False):
+	mesh = o3d.io.read_triangle_mesh(path)
 	if len(mesh.vertices) == 0:
-		print(f"[ATTENZIONE] '{percorso}' non contiene vertici, o non è stato trovato.")
+		print(f"[WARNING] '{path}' has no vertices, or was not found.")
 		return
-
 	mesh.compute_vertex_normals()
 
-	print(f"Mesh caricata: {percorso}")
-	print(f"  Vertici : {len(mesh.vertices)}")
-	print(f"  Triangoli: {len(mesh.triangles)}")
-	print(f"\nControlli: trascina per ruotare, rotella per zoomare, tasto destro per pan.")
-	print(f"Premi 'S' per salvare uno screenshot della vista corrente. Chiudi la finestra per uscire.")
+	print(f"Mesh loaded: {path}")
+	print(f"  Vertices : {len(mesh.vertices)}")
+	print(f"  Triangles: {len(mesh.triangles)}")
+	print("\nControls: drag to rotate, wheel to zoom, right button to pan.")
+	print("Press 'S' to save a screenshot of the current view. Close the window to exit.")
 
-	os.makedirs(CARTELLA_SCREENSHOT, exist_ok=True)
+	os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
 
 	vis = o3d.visualization.VisualizerWithKeyCallback()
-	# dimensioni/posizione esplicite: su WSLg i default (1920x1080) possono finire fuori schermo
-	vis.create_window(window_name=percorso, width=1280, height=720, left=100, top=100)
+	# explicit size/position: on WSLg the defaults (1920x1080) can end up off screen
+	vis.create_window(window_name=path, width=1280, height=720, left=100, top=100)
 	vis.add_geometry(mesh)
 
 	if wireframe:
-		linee = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
-		linee.paint_uniform_color([0, 0, 0])
-		vis.add_geometry(linee)
+		lines = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+		lines.paint_uniform_color([0, 0, 0])
+		vis.add_geometry(lines)
 
 	render_opt = vis.get_render_option()
 	if render_opt is None:
-		print("[ERRORE] Contesto OpenGL non inizializzato (GLEW).")
+		print("[ERROR] OpenGL context not initialised (GLEW).")
 		vis.destroy_window()
 		return
 	render_opt.mesh_show_back_face = True
 
-	# vista obliqua dall'alto: l'asse "su" è quello con estensione minima della bbox
-	# (i terreni sono quasi piatti; con la vista di default si vedrebbero di taglio)
-	import numpy as np
-	asse_su = int(np.argmin(mesh.get_axis_aligned_bounding_box().get_extent()))
-	su = np.zeros(3); su[asse_su] = 1.0
-	orizzontale = np.zeros(3); orizzontale[(asse_su + 1) % 3] = 1.0
+	# oblique view from above: "up" is the axis with the smallest bbox extent (terrains are almost flat)
+	up_axis = int(np.argmin(mesh.get_axis_aligned_bounding_box().get_extent()))
+	up = np.zeros(3); up[up_axis] = 1.0
+	horizontal = np.zeros(3); horizontal[(up_axis + 1) % 3] = 1.0
 	ctr = vis.get_view_control()
 	ctr.set_lookat(mesh.get_center())
-	ctr.set_up(su)
-	ctr.set_front(su + orizzontale)
+	ctr.set_up(up)
+	ctr.set_front(up + horizontal)
 	ctr.set_zoom(0.6)
-	render_opt.mesh_color_option = o3d.visualization.MeshColorOption.Color  # forza l'uso dei colori vertice
+	render_opt.mesh_color_option = o3d.visualization.MeshColorOption.Color
 
-	def salva_screenshot(vis):
+	def save_screenshot(vis):
 		timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-		nome_base = os.path.splitext(os.path.basename(percorso))[0]
-		percorso_output = os.path.join(CARTELLA_SCREENSHOT, f"{nome_base}_{timestamp}.png")
-		vis.capture_screen_image(percorso_output, do_render=True)
-		print(f"Screenshot salvato in: {percorso_output}")
-		return False  # False = non richiede un altro render extra
+		base_name = os.path.splitext(os.path.basename(path))[0]
+		output_path = os.path.join(SCREENSHOT_FOLDER, f"{base_name}_{timestamp}.png")
+		vis.capture_screen_image(output_path, do_render=True)
+		print(f"Screenshot saved to: {output_path}")
+		return False
 
-	vis.register_key_callback(ord("S"), salva_screenshot)
-
+	vis.register_key_callback(ord("S"), save_screenshot)
 	vis.run()
 	vis.destroy_window()
 
 
 if __name__ == "__main__":
-	visualizza(PERCORSO_MESH, wireframe=MOSTRA_WIREFRAME)
+	visualize(MESH_PATH, wireframe=SHOW_WIREFRAME)

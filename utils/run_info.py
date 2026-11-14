@@ -1,12 +1,5 @@
-"""
-Informazioni di contorno di una run di evaluate.py, che dopo non si possono ricostruire:
-  - ambiente(): macchina, GPU, versioni delle librerie
-  - stato_git(): commit, ramo, modifiche non committate (+ diff)
-  - TeeLog: copia in un file tutto quello che finisce sul terminale (anche dei sottoprocessi)
-  - MonitorRisorse: picco di RAM (processo + figli, es. PPSurf) e di VRAM durante un blocco di codice
-
-Tutto leggero: il monitor campiona RAM e VRAM una volta al secondo in un thread a parte.
-"""
+"""Run metadata for evaluate.py: machine and library versions, git state, a terminal tee to a log file,
+and a monitor of peak RAM and VRAM."""
 
 import os
 import platform
@@ -17,145 +10,145 @@ import threading
 
 try:
 	import psutil
-except ImportError:  # senza psutil la RAM non viene misurata
+except ImportError:  # without psutil RAM is not measured
 	psutil = None
 
 
-def _esegui(cmd: list, **kwargs) -> str:
-	"""stdout di un comando, "" se fallisce o non esiste."""
+def _run(cmd: list, **kwargs) -> str:
+	"""stdout of a command, "" if it fails or does not exist."""
 	try:
 		return subprocess.run(cmd, capture_output=True, text=True, timeout=60, **kwargs).stdout.strip()
 	except (OSError, subprocess.SubprocessError):
 		return ""
 
 
-def ambiente(python_ppsurf: str = None) -> dict:
-	"""Macchina e versioni. python_ppsurf: interprete dell'ambiente di PPSurf, per la versione di PyTorch."""
+def environment(ppsurf_python: str = None) -> dict:
+	"""Machine and versions. ppsurf_python: interpreter of the PPSurf environment, for the PyTorch version."""
 	cpu = ""
 	if os.path.exists("/proc/cpuinfo"):
 		with open("/proc/cpuinfo") as f:
 			cpu = next((r.split(":", 1)[1].strip() for r in f if r.startswith("model name")), "")
 	info = {
 		"hostname": socket.gethostname(),
-		"sistema": platform.platform(),
+		"system": platform.platform(),
 		"cpu": cpu,
 		"n_cpu": os.cpu_count(),
-		"ram_totale_gb": round(psutil.virtual_memory().total / 2**30, 1) if psutil else None,
-		"gpu": _esegui(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"]) or None,
+		"total_ram_gb": round(psutil.virtual_memory().total / 2**30, 1) if psutil else None,
+		"gpu": _run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"]) or None,
 		"python": platform.python_version(),
 	}
-	for modulo in ("open3d", "numpy", "pandas"):
+	for module in ("open3d", "numpy", "pandas"):
 		try:
-			info[modulo] = __import__(modulo).__version__
+			info[module] = __import__(module).__version__
 		except ImportError:
 			pass
-	if python_ppsurf:
-		info["pytorch_ppsurf"] = _esegui([python_ppsurf, "-c",
+	if ppsurf_python:
+		info["pytorch_ppsurf"] = _run([ppsurf_python, "-c",
 			"import torch; print(torch.__version__, 'CUDA', torch.version.cuda)"]) or None
 	return info
 
 
-def stato_git(cartella: str = ".") -> tuple:
-	"""(info, diff): commit, ramo e file modificati; diff = git diff rispetto al commit ("" se pulito)."""
-	commit = _esegui(["git", "rev-parse", "HEAD"], cwd=cartella)
+def git_state(folder: str = ".") -> tuple:
+	"""(info, diff): commit, branch and modified files; diff = git diff against the commit ("" if clean)."""
+	commit = _run(["git", "rev-parse", "HEAD"], cwd=folder)
 	if not commit:
-		return {"git": "non disponibile"}, ""
-	modificati = _esegui(["git", "status", "--porcelain"], cwd=cartella).splitlines()
+		return {"git": "not available"}, ""
+	modified = _run(["git", "status", "--porcelain"], cwd=folder).splitlines()
 	info = {
 		"commit": commit,
-		"ramo": _esegui(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cartella),
-		"modifiche_non_committate": [r.strip() for r in modificati] or "nessuna",
+		"branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=folder),
+		"uncommitted_changes": [r.strip() for r in modified] or "none",
 	}
-	return info, _esegui(["git", "diff", "HEAD"], cwd=cartella)
+	return info, _run(["git", "diff", "HEAD"], cwd=folder)
 
 
 class TeeLog:
-	"""Duplica stdout e stderr (a livello di file descriptor, quindi anche l'output dei sottoprocessi
-	e delle librerie C++ come Open3D) sul terminale e in un file."""
+	"""Duplicates stdout and stderr at file-descriptor level (so also subprocesses and C++ libraries
+	such as Open3D) to the terminal and to a file."""
 
-	def __init__(self, percorso: str):
-		self.percorso = percorso
+	def __init__(self, path: str):
+		self.path = path
 
 	def __enter__(self):
 		sys.stdout.flush(); sys.stderr.flush()
-		self.file = open(self.percorso, "ab")
-		self.originale_out, self.originale_err = os.dup(1), os.dup(2)
-		lettura, scrittura = os.pipe()
-		os.dup2(scrittura, 1); os.dup2(scrittura, 2)
-		os.close(scrittura)
-		self.lettura = lettura
-		self.thread = threading.Thread(target=self._copia, daemon=True)
+		self.file = open(self.path, "ab")
+		self.orig_out, self.orig_err = os.dup(1), os.dup(2)
+		read_fd, write_fd = os.pipe()
+		os.dup2(write_fd, 1); os.dup2(write_fd, 2)
+		os.close(write_fd)
+		self.read_fd = read_fd
+		self.thread = threading.Thread(target=self._copy, daemon=True)
 		self.thread.start()
-		sys.stdout.reconfigure(line_buffering=True)  # su una pipe Python bufferizza a blocchi
+		sys.stdout.reconfigure(line_buffering=True)  # on a pipe Python buffers in blocks
 		return self
 
-	def _copia(self):
+	def _copy(self):
 		while True:
-			dati = os.read(self.lettura, 65536)
-			if not dati:
+			data = os.read(self.read_fd, 65536)
+			if not data:
 				break
-			os.write(self.originale_out, dati)
-			self.file.write(dati); self.file.flush()
+			os.write(self.orig_out, data)
+			self.file.write(data); self.file.flush()
 
 	def __exit__(self, *exc):
 		sys.stdout.flush(); sys.stderr.flush()
-		os.dup2(self.originale_out, 1); os.dup2(self.originale_err, 2)  # chiude l'ultimo lato di scrittura
+		os.dup2(self.orig_out, 1); os.dup2(self.orig_err, 2)  # closes the last write end
 		self.thread.join(timeout=5)
-		os.close(self.lettura); os.close(self.originale_out); os.close(self.originale_err)
+		os.close(self.read_fd); os.close(self.orig_out); os.close(self.orig_err)
 		self.file.close()
 		return False
 
 
-class MonitorRisorse:
-	"""Picco di RAM (processo + tutti i figli) e di VRAM (rispetto all'inizio) durante il blocco with.
-	Dopo l'uscita: self.ram_picco_mb, self.vram_picco_mb (None se non misurabili)."""
+class ResourceMonitor:
+	"""Peak RAM (process + all children) and VRAM (relative to the start) during the with block.
+	After exit: self.peak_ram_mb, self.peak_vram_mb (None if not measurable)."""
 
-	def __init__(self, intervallo_s: float = 1.0):
-		self.intervallo = intervallo_s
-		self.ram_picco_mb = None
-		self.vram_picco_mb = None
+	def __init__(self, interval_s: float = 1.0):
+		self.interval = interval_s
+		self.peak_ram_mb = None
+		self.peak_vram_mb = None
 
 	@staticmethod
 	def _ram_mb():
 		if psutil is None:
 			return None
-		processo = psutil.Process()
-		totale = 0
-		for p in [processo] + processo.children(recursive=True):
+		process = psutil.Process()
+		total = 0
+		for p in [process] + process.children(recursive=True):
 			try:
-				totale += p.memory_info().rss
-			except psutil.Error:  # figlio terminato nel frattempo
+				total += p.memory_info().rss
+			except psutil.Error:  # child exited meanwhile
 				pass
-		return totale / 2**20
+		return total / 2**20
 
 	@staticmethod
 	def _vram_mb():
-		uscita = _esegui(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+		out = _run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
 		try:
-			return float(uscita.splitlines()[0])
+			return float(out.splitlines()[0])
 		except (IndexError, ValueError):
 			return None
 
-	def _campiona(self):
+	def _sample(self):
 		ram, vram = self._ram_mb(), self._vram_mb()
 		if ram is not None:
-			self.ram_picco_mb = max(self.ram_picco_mb or 0.0, ram)
+			self.peak_ram_mb = max(self.peak_ram_mb or 0.0, ram)
 		if vram is not None and self._vram_base is not None:
-			self.vram_picco_mb = max(self.vram_picco_mb or 0.0, vram - self._vram_base)
+			self.peak_vram_mb = max(self.peak_vram_mb or 0.0, vram - self._vram_base)
 
-	def _ciclo(self):
-		while not self._stop.wait(self.intervallo):
-			self._campiona()
+	def _loop(self):
+		while not self._stop.wait(self.interval):
+			self._sample()
 
 	def __enter__(self):
 		self._vram_base = self._vram_mb()
 		self._stop = threading.Event()
-		self._thread = threading.Thread(target=self._ciclo, daemon=True)
+		self._thread = threading.Thread(target=self._loop, daemon=True)
 		self._thread.start()
 		return self
 
 	def __exit__(self, *exc):
 		self._stop.set()
 		self._thread.join()
-		self._campiona()
+		self._sample()
 		return False

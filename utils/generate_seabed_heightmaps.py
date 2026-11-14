@@ -1,21 +1,12 @@
 """
-Generatore di fondali sintetici (heightmap) per dataset train/val/test.
+Generates synthetic seabed heightmaps in six families (optionally with pipes and pillars), split per terrain
+into train/val/test. For each terrain it writes <out>/<split>/<id>/<id>.raw (uint16 little-endian, for a Unity
+Terrain), <id>.png (16-bit), <id>_preview.png (hillshade) and <id>.json (seed, family, parameters, objects,
+Unity settings), plus <out>/manifest.csv. Each terrain depends only on (family, seed, resolution, size,
+height_range, flags). The noise is synthesised in Fourier space, so it is periodic.
 
-Per ogni terreno produce:
-  <out>/<split>/<id>/<id>.raw          heightmap uint16 little-endian ("Windows" in Unity), da importare nel Terrain
-  <out>/<split>/<id>/<id>.png          stessa heightmap in PNG 16 bit (se Pillow e' installato)
-  <out>/<split>/<id>/<id>_preview.png  hillshade per un controllo visivo (se matplotlib e' installato)
-  <out>/<split>/<id>/<id>.json         seed, famiglia, parametri, oggetti aggiunti, impostazioni Unity
-  <out>/manifest.csv                   una riga per terreno, con lo split assegnato
-
-Riproducibilita': ogni terreno dipende solo da (famiglia, seed, risoluzione, size, height_range, flag).
-Lo split e' fatto PER TERRENO (mai per scan): un terreno sta in un solo split.
-
-Nota sul rumore: e' sintetizzato nello spazio di Fourier, quindi e' periodico (il bordo sinistro si
-raccorda con il destro). Non e' un problema per il Terrain, ma tienilo presente se vuoi tassellare.
-
-Uso minimo:
-  python generate_seabed_heightmaps.py --out data/synthetic --n-per-family 10
+Usage:
+  python utils/generate_seabed_heightmaps.py --with-structures --n-per-family 17
 """
 import argparse
 import csv
@@ -27,42 +18,38 @@ import numpy as np
 
 try:
     from PIL import Image
-except ImportError:  # PNG a 16 bit opzionale
+except ImportError:  # 16-bit PNG is optional
     Image = None
 
 try:
     import matplotlib
-    matplotlib.use("Agg")  # headless (WSL senza display)
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError:
     plt = None
 
-
-# ---------------------------------------------------------------------------
-# Primitive
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Ctx:
     res: int
     size_m: float
     rng: np.random.Generator
-    X: np.ndarray  # coordinate x in metri (varia lungo le colonne)
-    Y: np.ndarray  # coordinate y in metri (varia lungo le righe)
+    X: np.ndarray  # x in metres (varies along columns)
+    Y: np.ndarray  # y in metres (varies along rows)
 
     @property
     def cell(self) -> float:
         return self.size_m / (self.res - 1)
 
     def noise(self, beta: float, min_wavelength_m: float) -> np.ndarray:
-        """Rumore spettrale privo di strutture piu' fini di ~min_wavelength_m."""
+        """Spectral noise without structures finer than ~min_wavelength_m."""
         return spectral_noise(self.res, beta, self.rng, fc=self.cell / min_wavelength_m)
 
 
 def spectral_noise(res: int, beta: float, rng: np.random.Generator, fc: float = None) -> np.ndarray:
-    """Rumore gaussiano con spettro di potenza ~ 1/f^beta, normalizzato a std = 1.
-    beta piu' alto = piu' liscio. fc = frequenza di taglio gaussiana in cicli/pixel (vedi Ctx.fc):
-    senza taglio la pendenza locale e' dominata dal rumore a scala del pixel (irrealistico)."""
+    """Gaussian noise with power spectrum ~ 1/f^beta, normalised to std = 1 (higher beta = smoother).
+    fc = Gaussian cut-off frequency in cycles/pixel: without it the local slope is dominated by
+    pixel-scale noise (unrealistic)."""
     white = rng.standard_normal((res, res))
     fx = np.fft.fftfreq(res)[:, None]
     fy = np.fft.fftfreq(res)[None, :]
@@ -82,13 +69,13 @@ def smoothstep(x: np.ndarray) -> np.ndarray:
 
 
 def _idx(ctx: Ctx, cx: float, cy: float):
-    i = int(np.clip(round(cy / ctx.cell), 0, ctx.res - 1))  # riga <-> y
-    j = int(np.clip(round(cx / ctx.cell), 0, ctx.res - 1))  # colonna <-> x
+    i = int(np.clip(round(cy / ctx.cell), 0, ctx.res - 1))  # row <-> y
+    j = int(np.clip(round(cx / ctx.cell), 0, ctx.res - 1))  # column <-> x
     return i, j
 
 
 def add_boulders(h: np.ndarray, ctx: Ctx, n: int, r_range=(0.3, 1.2)) -> int:
-    """Massi: semisfere schiacciate, appoggiate sul terreno locale (in place)."""
+    """Boulders: flattened half-spheres resting on the local terrain (in place)."""
     rng = ctx.rng
     for _ in range(n):
         cx, cy = rng.uniform(0, ctx.size_m, 2)
@@ -106,9 +93,7 @@ def add_boulders(h: np.ndarray, ctx: Ctx, n: int, r_range=(0.3, 1.2)) -> int:
     return n
 
 
-# ---------------------------------------------------------------------------
-# Famiglie di fondale (tutte restituiscono altezze in metri + parametri usati)
-# ---------------------------------------------------------------------------
+# seabed families: each returns heights in metres + the parameters used
 
 def fam_flat_sand(ctx: Ctx):
     rng = ctx.rng
@@ -123,11 +108,11 @@ def fam_flat_sand(ctx: Ctx):
 def fam_sand_ripples(ctx: Ctx):
     rng = ctx.rng
     wavelength = rng.uniform(1.0, 3.0)
-    amp = wavelength * rng.uniform(0.01, 0.04)  # steepness realistica (pendenza picco ~4-14 gradi)
+    amp = wavelength * rng.uniform(0.01, 0.04)  # realistic steepness (peak slope ~4-14 degrees)
     theta = rng.uniform(0, np.pi)
     warp = 0.6 * wavelength * ctx.noise(3.0, 8.0)
     u = ctx.X * np.cos(theta) + ctx.Y * np.sin(theta) + warp
-    env = smoothstep(0.5 + 0.35 * ctx.noise(3.0, 8.0))  # ampiezza ondulazioni variabile
+    env = smoothstep(0.5 + 0.35 * ctx.noise(3.0, 8.0))  # variable ripple amplitude
     ripples = amp * env * np.sin(2 * np.pi * u / wavelength)
     swell = 0.4 * ctx.noise(3.0, 8.0)
     return ripples + swell, dict(wavelength_m=wavelength, amp_m=amp, theta_rad=theta)
@@ -163,7 +148,7 @@ def fam_ridges(ctx: Ctx):
 
 
 def fam_mixed(ctx: Ctx):
-    """Sabbia rippled e roccia fuse con una maschera liscia."""
+    """Rippled sand and rock blended with a smooth mask."""
     h_sand, p_sand = fam_sand_ripples(ctx)
     h_rock, p_rock = fam_rocky(ctx)
     mask = smoothstep(0.5 + 0.8 * ctx.noise(3.0, 10.0))
@@ -181,10 +166,6 @@ FAMILIES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Strutture (obiettivo finale: tubi/cavi, piloni) -- opzionali
-# ---------------------------------------------------------------------------
-
 def _dist_point_segment(X, Y, p0, p1):
     d = p1 - p0
     t = ((X - p0[0]) * d[0] + (Y - p0[1]) * d[1]) / (d @ d)
@@ -193,7 +174,7 @@ def _dist_point_segment(X, Y, p0, p1):
 
 
 def add_structures(h: np.ndarray, ctx: Ctx):
-    """Aggiunge 0-2 tubi (semicilindri appoggiati) e 0-2 piloni (cilindri). Dopo il fit del terreno."""
+    """Adds 0-2 pipes (half-cylinders lying on the seabed) and 0-2 pillars (cylinders), after fitting the terrain."""
     rng = ctx.rng
     info = dict(pipes=[], pillars=[])
     for _ in range(int(rng.integers(0, 3))):
@@ -203,7 +184,7 @@ def add_structures(h: np.ndarray, ctx: Ctx):
         p1 = p0 + length * np.array([np.cos(ang), np.sin(ang)])
         r = rng.uniform(0.15, 0.5)
         d = _dist_point_segment(ctx.X, ctx.Y, p0, p1)
-        h += np.sqrt(np.maximum(r ** 2 - d ** 2, 0.0))  # segue il terreno locale
+        h += np.sqrt(np.maximum(r ** 2 - d ** 2, 0.0))  # follows the local terrain
         info["pipes"].append(dict(p0=p0.tolist(), p1=p1.tolist(), radius_m=r))
     for _ in range(int(rng.integers(0, 3))):
         cx, cy = rng.uniform(0.1, 0.9, 2) * ctx.size_m
@@ -217,13 +198,9 @@ def add_structures(h: np.ndarray, ctx: Ctx):
     return h, info
 
 
-# ---------------------------------------------------------------------------
-# Terreno completo, I/O, split
-# ---------------------------------------------------------------------------
-
 def fit_to_range(h: np.ndarray, height_range: float, lo=0.02, hi=0.85):
-    """Sposta il minimo a lo*H; se serve, comprime uniformemente per stare sotto hi*H
-    (lascia margine per le strutture). Ritorna anche il fattore di scala applicato."""
+    """Moves the minimum to lo*H and, if needed, compresses uniformly to stay below hi*H (leaves room for
+    the structures). Also returns the scale factor applied."""
     floor = lo * height_range
     h = h - h.min() + floor
     scale = 1.0
@@ -270,30 +247,30 @@ def assign_splits(n: int, ratios, test_only: bool):
     n_tr = int(round(n * ratios[0]))
     n_va = int(round(n * ratios[1]))
     n_te = n - n_tr - n_va
-    if n >= 3:  # almeno un terreno per split
+    if n >= 3:  # at least one terrain per split
         n_va, n_te = max(n_va, 1), max(n_te, 1)
         n_tr = n - n_va - n_te
     return ["train"] * n_tr + ["val"] * n_va + ["test"] * max(n_te, 0)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Genera fondali sintetici (heightmap RAW 16 bit) con split per terreno.")
-    ap.add_argument("--out", default="data/synthetic", help="cartella di output")
-    ap.add_argument("--n-per-family", type=int, default=10, help="terreni per ogni famiglia")
+    ap = argparse.ArgumentParser(description="Generates synthetic seabeds (16-bit RAW heightmaps) with a per-terrain split.")
+    ap.add_argument("--out", default="data/synthetic", help="output folder")
+    ap.add_argument("--n-per-family", type=int, default=10, help="terrains per family")
     ap.add_argument("--families", nargs="+", default=list(FAMILIES), choices=list(FAMILIES))
     ap.add_argument("--test-only-families", nargs="*", default=[], choices=list(FAMILIES),
-                    help="famiglie usate SOLO nel test (per misurare la generalizzazione a fondali mai visti)")
-    ap.add_argument("--resolution", type=int, default=1025, help="lato della heightmap; per Unity usa 2^n + 1 (513, 1025, ...)")
-    ap.add_argument("--size", type=float, default=100.0, help="lato del terreno in metri (X e Z)")
-    ap.add_argument("--height-range", type=float, default=20.0, help="escursione verticale massima in metri (= Terrain Height in Unity)")
-    ap.add_argument("--seed", type=int, default=0, help="seed globale del dataset")
+                    help="families used ONLY in test (to measure generalisation to unseen seabeds)")
+    ap.add_argument("--resolution", type=int, default=1025, help="heightmap side; for Unity use 2^n + 1 (513, 1025, ...)")
+    ap.add_argument("--size", type=float, default=100.0, help="terrain side in metres (X and Z)")
+    ap.add_argument("--height-range", type=float, default=20.0, help="maximum vertical range in metres (= Terrain Height in Unity)")
+    ap.add_argument("--seed", type=int, default=0, help="global dataset seed")
     ap.add_argument("--split", type=float, nargs=3, default=[0.7, 0.15, 0.15], metavar=("TRAIN", "VAL", "TEST"))
-    ap.add_argument("--with-structures", action="store_true", help="aggiunge tubi e piloni")
+    ap.add_argument("--with-structures", action="store_true", help="adds pipes and pillars")
     ap.add_argument("--no-preview", action="store_true")
     args = ap.parse_args()
 
     if abs(sum(args.split) - 1.0) > 1e-6:
-        ap.error("le tre frazioni di --split devono sommare a 1")
+        ap.error("the three --split fractions must sum to 1")
 
     os.makedirs(args.out, exist_ok=True)
     manifest = []
@@ -329,7 +306,7 @@ def main():
                                  n_pipes=len(meta["structures"].get("pipes", [])),
                                  n_pillars=len(meta["structures"].get("pillars", [])),
                                  raw=os.path.join(split, tid, f"{tid}.raw")))
-            print(f"[{split:5s}] {tid}  relief={meta['relief_m']:.2f} m  scala={meta['scale_applied']:.3f}"
+            print(f"[{split:5s}] {tid}  relief={meta['relief_m']:.2f} m  scale={meta['scale_applied']:.3f}"
                   f"{'  CLIPPED' if meta['clipped'] else ''}")
 
     with open(os.path.join(args.out, "manifest.csv"), "w", newline="") as f:
@@ -338,14 +315,14 @@ def main():
         w.writerows(manifest)
 
     n = {s: sum(m["split"] == s for m in manifest) for s in ("train", "val", "test")}
-    print(f"\nGenerati {len(manifest)} terreni -> {args.out}  (train {n['train']}, val {n['val']}, test {n['test']})")
+    print(f"\nGenerated {len(manifest)} terrains -> {args.out}  (train {n['train']}, val {n['val']}, test {n['test']})")
     print(f"Unity: Terrain Settings > Import Raw: Depth 16 bit, Byte Order Windows, "
           f"Resolution {args.resolution} x {args.resolution}; "
           f"Terrain Width/Length {args.size} m, Height {args.height_range} m.")
     n_scaled = sum(m["scale_applied"] < 1.0 for m in manifest)
     if n_scaled:
-        print(f"Nota: {n_scaled} terreni sono stati compressi in verticale per stare nel range "
-              f"(vedi scale_applied nel manifest).")
+        print(f"Note: {n_scaled} terrains were compressed vertically to fit the range "
+              f"(see scale_applied in the manifest).")
 
 
 if __name__ == "__main__":

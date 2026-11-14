@@ -1,58 +1,58 @@
-# Config di evaluate.py (e degli script di benchmark/).
-# Ogni terreno sintetico viene caricato, pulito (preprocessing) e ricostruito con ciascun metodo;
-# la mesh viene confrontata con la ground truth (sezione evaluation).
+# Config of evaluate.py (and of the scripts in benchmark/).
+# Each synthetic terrain is loaded, cleaned (preprocessing) and reconstructed with each method;
+# the mesh is compared with the ground truth (evaluation section).
 
 paths:
-  neural_methods: "neural_methods"   # root dei repo neurali clonati (contiene ppsurf/)
+  neural_methods: "neural_methods"   # root of the cloned neural repositories (contains ppsurf/)
 
 preprocessing:
   downsampling:
-    abilitato: true                  # false = nessun voxel downsampling (tutti i punti del CSV)
-    voxel_size: 0.5                  # lato del voxel in metri
-  rimozione_outlier:
-    abilitato: true                  # false = nessun filtro statistico degli outlier
-    nb_neighbors: 20                 # quanti vicini considerare per punto
-    std_ratio: 2.0                   # soglia in deviazioni standard
+    enabled: true                    # false = no voxel downsampling (all points of the CSV)
+    voxel_size: 0.5                  # voxel side in metres
+  outlier_removal:
+    enabled: true                    # false = no statistical outlier filter
+    nb_neighbors: 20                 # neighbours considered per point
+    std_ratio: 2.0                   # threshold in standard deviations
 
-# Dopo la ricostruzione (con e senza sliding window): via i triangoli il cui baricentro dista piu' di
-# distanza_max_punti (m) dal punto piu' vicino della point cloud pulita (con la SW: della finestra).
-# Senza, Poisson chiude ogni finestra con una cupola nell'acqua (~6 m sopra il fondale, ~1/3 della mesh).
-# Deve restare > evaluation.tau, altrimenti la precisione a tau e' garantita dal ritaglio stesso.
+# After reconstruction (with and without sliding window): drop the triangles whose centroid is farther
+# than max_point_distance (m) from the nearest point of the cleaned point cloud (with SW: of the window).
+# Without it, Poisson closes each window with a dome in the water (~6 m above the seabed, ~1/3 of the mesh).
+# Must stay > evaluation.tau, otherwise precision at tau is guaranteed by the crop itself.
 postprocessing:
-  distanza_max_punti: 1.0            # null = nessun ritaglio
+  max_point_distance: 1.0            # null = no crop
 
-# Ricostruzione a finestre di ping: il CSV viene letto a blocchi come se arrivasse dal sonar,
-# ogni finestra viene ricostruita e scartata, le mesh delle finestre (ritagliate sulla propria
-# zona) vengono unite. Attivabile anche da riga di comando: evaluate.py --sliding_window on/off.
+# Reconstruction in windows of pings: the CSV is read in chunks as if it came from the sonar,
+# each window is reconstructed and discarded, and the window meshes (cropped to their own
+# area) are merged. Can also be set from the command line: evaluate.py --sliding_window on/off.
 sliding_window:
-  abilitato: false
-  ping_per_finestra: 150             # ping per finestra (sintetici: ~190 punti/ping, 150 ping ~ 25 m di rotta)
-  # con 300 ping PPSurf lasciava molti buchi (flat_sand_012: richiamo a tau=0.2 0.70 -> 0.98 con 150)
-  ping_sovrapposizione: 30           # ping in comune tra finestre consecutive (divisi a meta' nel ritaglio)
-  righe_per_blocco: 20000            # righe lette dal CSV per volta (simula l'arrivo dei dati)
-  punti_campione_per_finestra: 5000  # punti tenuti per finestra (restituiti con la mesh, non usati dalle metriche)
+  enabled: false
+  pings_per_window: 150              # pings per window (synthetic: ~190 points/ping, 150 pings ~ 25 m of track)
+  # with 300 pings PPSurf left many holes (flat_sand_012: recall at tau=0.2 0.70 -> 0.98 with 150)
+  overlap_pings: 30                  # pings shared by consecutive windows (split in half by the crop)
+  rows_per_chunk: 20000              # CSV rows read at a time (simulates data arrival)
+  sample_points_per_window: 5000     # points kept per window (returned with the mesh, not used by the metrics)
 
 poisson:
-  profondita: 9                      # profondita' dell'octree (celle ~0.2 m su 100 m)
-  rimuovi_bassa_densita: 0.05        # quantile di vertici a bassa densita' da rimuovere (scelto con benchmark/sweep_densita_poisson.py)
-  dimensione_min_componente: 0       # componenti connesse piu' piccole vengono rimosse (con 0.05 sopra non cambia nulla)
+  depth: 9                           # octree depth (cells ~0.2 m over 100 m)
+  remove_low_density: 0.05           # quantile of low-density vertices to remove (chosen with benchmark/poisson_density_sweep.py)
+  min_component_size: 0              # smaller connected components are removed (with 0.05 above it changes nothing)
 
 ppsurf:
-  max_punti: 250000                  # sottocampionamento casuale oltre questa soglia (consigliata dal README di PPSurf)
-  gen_resolution_global: 129         # griglia di marching cubes (default 257: OOM su 4 GB; su 12 GB non migliora, vedi README)
-  rec_batch_size: 10000              # punti della griglia valutati per volta (default 50000: OOM su 4 GB)
-  gen_subsample_manifold_iter: 3     # test-time augmentation: ripetizioni della parte globale su sottoinsiemi dei punti (default PPSurf 10)
-  gen_refine_iter: 3                 # raffinamento delle intersezioni di marching cubes (default PPSurf 10)
-  # 3/3 invece di 10/10: -36% di tempo (176 -> 112 s per terreno), qualita' invariata o migliore (vedi README)
-  conda_env: "pps"                   # ambiente conda di PPSurf
-  work_dir: "output/ppsurf_tmp"      # file temporanei scambiati col sottoprocesso
-  timeout_s: 1200                    # oltre 20 min (normale: ~3 min) il sottoprocesso viene terminato e il terreno segnato come errore
+  max_points: 250000                 # random subsampling above this threshold (recommended by the PPSurf README)
+  gen_resolution_global: 129         # marching-cubes grid (default 257: OOM on 4 GB; no better on 12 GB, see report)
+  rec_batch_size: 10000              # grid points evaluated at a time (default 50000: OOM on 4 GB)
+  gen_subsample_manifold_iter: 3     # test-time augmentation: repetitions of the global part on point subsets (PPSurf default 10)
+  gen_refine_iter: 3                 # refinement of the marching-cubes intersections (PPSurf default 10)
+  # 3/3 instead of 10/10: -36% time (176 -> 112 s per terrain), same or better quality (see report)
+  conda_env: "pps"                   # conda environment of PPSurf
+  work_dir: "output/ppsurf_tmp"      # temporary files exchanged with the subprocess
+  timeout_s: 1200                    # after 20 min (normal: ~3 min) the subprocess is killed and the terrain marked as an error
 
 evaluation:
   synthetic_dir: "data/synthetic"    # <split>/<id>/{<id>_scan.csv, <id>_ground_truth.obj}
-  output_dir: "output/evaluation"    # risultati in <output_dir>/<split>/ (mesh, distanze, CSV)
-  split: "test+val"                  # train, val, test, test+val (sovrascrivibile con --split)
-  limit: null                        # terreni per famiglia (i primi in ordine alfabetico); null = tutti
-  metodi: ["poisson", "ppsurf"]      # eseguiti in sequenza su ogni terreno
-  n_campioni: 100000                 # punti campionati su ciascuna superficie per le metriche
-  tau: 0.5                           # soglia di precisione/richiamo in metri (pari al voxel del preprocessing)
+  output_dir: "output/evaluation"    # one folder per run (meshes, distances, CSV)
+  split: "test+val"                  # train, val, test, test+val (overridable with --split)
+  limit: null                        # terrains per family (the first in alphabetical order); null = all
+  methods: ["poisson", "ppsurf"]     # run in sequence on each terrain
+  n_samples: 100000                  # points sampled on each surface for the metrics
+  tau: 0.5                           # precision/recall threshold in metres (equal to the preprocessing voxel)

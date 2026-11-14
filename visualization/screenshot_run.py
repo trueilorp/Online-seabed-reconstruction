@@ -1,31 +1,18 @@
 """
-Screenshot di tutte le mesh di una o piu' run di evaluate.py.
+Off-screen screenshots of every mesh of one or more evaluate.py runs (<run>/meshes/*.ply ->
+<run>/screenshots/<mesh name>.png), with a camera set by the terrain's ground-truth bounding box so the same
+terrain is framed identically across runs. --ground_truth also saves the GT seabed of each terrain.
 
-Per ogni cartella di run passata, apre ogni mesh in <run>/meshes/*.ply in una finestra
-Open3D nascosta e salva l'immagine in <run>/screenshots/<nome mesh>.png.
-
-La camera dipende solo dal terreno (dal bounding box del fondale della ground truth), non
-dalla mesh: lo stesso terreno viene inquadrato allo stesso modo in tutte le run, quindi le
-immagini di Poisson e PPSurf (con o senza SW) si possono confrontare direttamente.
-Se la ground truth non si trova, si usa il bounding box della mesh.
-
-Uso (dalla root del progetto, ambiente "ricostruzione3d"):
+Usage (from the repository root, "ricostruzione3d" environment):
 	python visualization/screenshot_run.py output/evaluation/<run1> output/evaluation/<run2>
-	python visualization/screenshot_run.py output/evaluation/<run> --vista alto --solo rocky_012 mixed_014
-	python visualization/screenshot_run.py output/evaluation/<run> --ground_truth   # anche il fondale vero
-	python visualization/screenshot_run.py --ground_truth --dati data/synthetic/test+val   # solo le .obj di una cartella
-
-Con --ground_truth [CARTELLA] salva anche il fondale della ground truth di ogni terreno della run
-(top_surface, senza pareti e fondo, stessa camera delle mesh) in CARTELLA/<id>_ground_truth.png
-(default output/groundtruth). Ogni terreno viene salvato una volta sola, anche con piu' run.
-Senza cartelle di run, con --ground_truth e --dati CARTELLA si salvano tutte le .obj trovate in
-CARTELLA (anche nelle sottocartelle). Le mesh chiuse (GT sintetiche, con pareti e fondo) vengono
-ridotte al fondale; quelle aperte (es. Terrain_ground_truth.obj di Unity) restano intere.
+	python visualization/screenshot_run.py output/evaluation/<run> --view top --only rocky_012 mixed_014
+	python visualization/screenshot_run.py output/evaluation/<run> --ground_truth
+	python visualization/screenshot_run.py --ground_truth --data data/synthetic/test+val
 """
 
 import os
 
-# su WSLg GLFW sceglie Wayland e la finestra (anche nascosta) non si crea -> forza X11
+# on WSLg GLFW picks Wayland and the (hidden) window is not created -> force X11
 os.environ.pop("WAYLAND_DISPLAY", None)
 os.environ["XDG_SESSION_TYPE"] = "x11"
 
@@ -41,153 +28,149 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.mesh import top_surface
 
-COLORE_MESH = [0.62, 0.70, 0.78]  # grigio-azzurro: il rilievo si legge dall'illuminazione
-FOV_GRADI = 50.0
-# direzione da cui guarda la camera (Y = verticale nei dati)
-VISTE = {
-	"obliqua": np.array([0.0, 1.0, 1.0]),  # 45 gradi dall'alto, lungo Z
-	"alto": np.array([0.0, 1.0, 1e-3]),    # quasi zenitale (non esattamente, per avere un "su" definito)
+MESH_COLOR = [0.62, 0.70, 0.78]
+FOV_DEG = 50.0
+# direction the camera looks from (Y = vertical in the data)
+VIEWS = {
+	"oblique": np.array([0.0, 1.0, 1.0]),
+	"top": np.array([0.0, 1.0, 1e-3]),  # not exactly zenithal, so that "up" is defined
 }
 
 
-def leggi_config_run(cartella_run: str) -> dict:
-	"""La config salvata da evaluate.py in config.txt ({} se manca o non si legge)."""
+def read_run_config(run: str) -> dict:
+	"""Config saved by evaluate.py in config.txt ({} if missing or unreadable)."""
 	try:
-		with open(os.path.join(cartella_run, "config.txt")) as f:
+		with open(os.path.join(run, "config.txt")) as f:
 			return yaml.safe_load(f) or {}
 	except (OSError, yaml.YAMLError):
 		return {}
 
 
-def fondale_terreno(config: dict, id_terreno: str, cache: dict):
-	"""Fondale (top_surface) della GT del terreno, None se la GT non c'e'."""
+def terrain_seabed(config: dict, terrain_id: str, cache: dict):
+	"""Seabed (top_surface) of the terrain's GT, None if the GT is missing."""
 	ev = config.get("evaluation", {})
-	percorso = os.path.join(ev.get("synthetic_dir", "data/synthetic"), ev.get("split", ""),
-							id_terreno, f"{id_terreno}_ground_truth.obj")
-	if percorso not in cache:
-		cache[percorso] = top_surface(o3d.io.read_triangle_mesh(percorso)) if os.path.exists(percorso) else None
-	return cache[percorso]
+	path = os.path.join(ev.get("synthetic_dir", "data/synthetic"), ev.get("split", ""),
+						terrain_id, f"{terrain_id}_ground_truth.obj")
+	if path not in cache:
+		cache[path] = top_surface(o3d.io.read_triangle_mesh(path)) if os.path.exists(path) else None
+	return cache[path]
 
 
-def parametri_camera(bbox, larghezza: int, altezza: int, direzione: np.ndarray) -> o3d.camera.PinholeCameraParameters:
-	"""Camera pinhole che guarda il centro del bbox da `direzione`, a distanza tale da inquadrarlo tutto."""
-	centro = bbox.get_center()
-	raggio = np.linalg.norm(bbox.get_extent()) / 2
-	f = 0.5 * larghezza / np.tan(np.radians(FOV_GRADI) / 2)
-	distanza = 1.0 * raggio / np.tan(np.radians(FOV_GRADI) / 2) * max(1.0, larghezza / altezza / 1.5)
-	avanti = -direzione / np.linalg.norm(direzione)            # dalla camera verso il centro
-	destra = np.cross(avanti, [0.0, 1.0, 0.0]); destra /= np.linalg.norm(destra)
-	giu = np.cross(avanti, destra)                              # convenzione Open3D: y della camera verso il basso
-	posizione = centro - avanti * distanza
-	R = np.stack([destra, giu, avanti])
-	estrinseca = np.eye(4)
-	estrinseca[:3, :3] = R
-	estrinseca[:3, 3] = -R @ posizione
-	parametri = o3d.camera.PinholeCameraParameters()
-	parametri.intrinsic = o3d.camera.PinholeCameraIntrinsic(larghezza, altezza, f, f,
-															 larghezza / 2 - 0.5, altezza / 2 - 0.5)
-	parametri.extrinsic = estrinseca
-	return parametri
+def camera_parameters(bbox, width: int, height: int, direction: np.ndarray) -> o3d.camera.PinholeCameraParameters:
+	"""Pinhole camera looking at the bbox centre from `direction`, far enough to frame all of it."""
+	center = bbox.get_center()
+	radius = np.linalg.norm(bbox.get_extent()) / 2
+	f = 0.5 * width / np.tan(np.radians(FOV_DEG) / 2)
+	distance = 1.0 * radius / np.tan(np.radians(FOV_DEG) / 2) * max(1.0, width / height / 1.5)
+	forward = -direction / np.linalg.norm(direction)
+	right = np.cross(forward, [0.0, 1.0, 0.0]); right /= np.linalg.norm(right)
+	down = np.cross(forward, right)  # Open3D convention: camera y points down
+	position = center - forward * distance
+	R = np.stack([right, down, forward])
+	extrinsic = np.eye(4)
+	extrinsic[:3, :3] = R
+	extrinsic[:3, 3] = -R @ position
+	params = o3d.camera.PinholeCameraParameters()
+	params.intrinsic = o3d.camera.PinholeCameraIntrinsic(width, height, f, f, width / 2 - 0.5, height / 2 - 0.5)
+	params.extrinsic = extrinsic
+	return params
 
 
-def screenshot(mesh: o3d.geometry.TriangleMesh, percorso_png: str, bbox, larghezza: int, altezza: int,
-			   direzione) -> bool:
+def screenshot(mesh: o3d.geometry.TriangleMesh, png_path: str, bbox, width: int, height: int, direction) -> bool:
 	if len(mesh.triangles) == 0:
-		print(f"  [vuota] {percorso_png}")
+		print(f"  [empty] {png_path}")
 		return False
-	mesh = o3d.geometry.TriangleMesh(mesh)  # copia: il fondale in cache non va ricolorato
+	mesh = o3d.geometry.TriangleMesh(mesh)  # copy: the cached seabed must not be recoloured
 	mesh.compute_vertex_normals()
-	mesh.paint_uniform_color(COLORE_MESH)
+	mesh.paint_uniform_color(MESH_COLOR)
 
 	vis = o3d.visualization.Visualizer()
-	if not vis.create_window(width=larghezza, height=altezza, visible=False):
-		raise RuntimeError("Finestra Open3D non creata (contesto OpenGL non disponibile)")
+	if not vis.create_window(width=width, height=height, visible=False):
+		raise RuntimeError("Open3D window not created (no OpenGL context)")
 	vis.add_geometry(mesh)
-	opzioni = vis.get_render_option()
-	opzioni.mesh_show_back_face = True  # il guscio doppio di PPSurf si vede anche dal lato interno
-	opzioni.background_color = np.array([1.0, 1.0, 1.0])
+	options = vis.get_render_option()
+	options.mesh_show_back_face = True  # the PPSurf double shell is visible from the inside too
+	options.background_color = np.array([1.0, 1.0, 1.0])
 	vis.get_view_control().convert_from_pinhole_camera_parameters(
-		parametri_camera(bbox or mesh.get_axis_aligned_bounding_box(), larghezza, altezza, direzione),
+		camera_parameters(bbox or mesh.get_axis_aligned_bounding_box(), width, height, direction),
 		allow_arbitrary=True)
 	vis.poll_events()
 	vis.update_renderer()
-	vis.capture_screen_image(percorso_png, do_render=True)
+	vis.capture_screen_image(png_path, do_render=True)
 	vis.destroy_window()
 	return True
 
 
-def salva_solo_ground_truth(args):
-	"""Screenshot di tutte le .obj di una cartella (ricorsivo), senza passare da una run."""
-	percorsi = sorted(glob.glob(os.path.join(args.dati, "**", "*.obj"), recursive=True))
-	if not percorsi:
-		sys.exit(f"Nessuna .obj in {args.dati}")
-	suffisso_vista = "" if args.vista == "obliqua" else "_" + args.vista
+def save_ground_truth_only(args):
+	"""Screenshots of all .obj files of a folder (recursive), without a run."""
+	paths = sorted(glob.glob(os.path.join(args.data, "**", "*.obj"), recursive=True))
+	if not paths:
+		sys.exit(f"No .obj in {args.data}")
+	view_suffix = "" if args.view == "oblique" else "_" + args.view
 	os.makedirs(args.ground_truth, exist_ok=True)
-	print(f"{args.dati}: {len(percorsi)} file .obj")
-	for percorso in percorsi:
-		nome = os.path.splitext(os.path.basename(percorso))[0]
-		if args.solo and not any(nome.startswith(i) for i in args.solo):
+	print(f"{args.data}: {len(paths)} .obj files")
+	for path in paths:
+		name = os.path.splitext(os.path.basename(path))[0]
+		if args.only and not any(name.startswith(i) for i in args.only):
 			continue
-		mesh = o3d.io.read_triangle_mesh(percorso)
-		# GT sintetiche chiuse: solo il fondale (pareti e fondo coprirebbero il terreno nella vista obliqua).
-		# "Chiusa" = nessun bordo aperto (is_watertight controllerebbe anche le autointersezioni: lento)
+		mesh = o3d.io.read_triangle_mesh(path)
+		# closed synthetic GT (no open boundary): seabed only, walls and bottom would hide the terrain
 		if len(mesh.get_non_manifold_edges(allow_boundary_edges=False)) == 0:
 			mesh = top_surface(mesh)
-		png = os.path.join(args.ground_truth, f"{nome}{suffisso_vista}.png")
-		if screenshot(mesh, png, mesh.get_axis_aligned_bounding_box(),
-					  args.larghezza, args.altezza, VISTE[args.vista]):
+		png = os.path.join(args.ground_truth, f"{name}{view_suffix}.png")
+		if screenshot(mesh, png, mesh.get_axis_aligned_bounding_box(), args.width, args.height, VIEWS[args.view]):
 			print(f"  {png}")
 
 
 def main():
-	parser = argparse.ArgumentParser(description="Screenshot di tutte le mesh di una o piu' run di evaluate.py")
-	parser.add_argument("run", nargs="*", help="cartelle di run (output/evaluation/<data_ora>_...)")
-	parser.add_argument("--dati", default=None,
-						help="senza cartelle di run: cartella di cui salvare tutte le .obj (es. data/synthetic/test+val)")
-	parser.add_argument("--vista", choices=list(VISTE), default="obliqua")
-	parser.add_argument("--solo", nargs="+", default=None, help="solo questi terreni (id)")
-	parser.add_argument("--larghezza", type=int, default=1600)
-	parser.add_argument("--altezza", type=int, default=1000)
-	parser.add_argument("--ground_truth", nargs="?", const="output/groundtruth", default=None, metavar="CARTELLA",
-						help="salva anche il fondale della GT di ogni terreno in CARTELLA (default output/groundtruth)")
+	parser = argparse.ArgumentParser(description="Screenshots of all meshes of one or more evaluate.py runs")
+	parser.add_argument("run", nargs="*", help="run folders (output/evaluation/<date_time>_...)")
+	parser.add_argument("--data", default=None,
+						help="without run folders: folder whose .obj files to save (e.g. data/synthetic/test+val)")
+	parser.add_argument("--view", choices=list(VIEWS), default="oblique")
+	parser.add_argument("--only", nargs="+", default=None, help="only these terrains (ids)")
+	parser.add_argument("--width", type=int, default=1600)
+	parser.add_argument("--height", type=int, default=1000)
+	parser.add_argument("--ground_truth", nargs="?", const="output/groundtruth", default=None, metavar="FOLDER",
+						help="also save the GT seabed of each terrain in FOLDER (default output/groundtruth)")
 	args = parser.parse_args()
 	if not args.run:
-		if not (args.ground_truth and args.dati):
-			parser.error("indicare almeno una cartella di run, oppure --ground_truth con --dati")
-		salva_solo_ground_truth(args)
+		if not (args.ground_truth and args.data):
+			parser.error("give at least one run folder, or --ground_truth with --data")
+		save_ground_truth_only(args)
 		return
 
-	cache_gt = {}
-	suffisso_vista = "" if args.vista == "obliqua" else "_" + args.vista
-	terreni_fatti = set()
-	for cartella_run in args.run:
-		mesh = sorted(glob.glob(os.path.join(cartella_run, "meshes", "*.ply")))
-		if not mesh:
-			print(f"Nessuna mesh in {cartella_run}/meshes: saltata")
+	gt_cache = {}
+	view_suffix = "" if args.view == "oblique" else "_" + args.view
+	done_terrains = set()
+	for run in args.run:
+		meshes = sorted(glob.glob(os.path.join(run, "meshes", "*.ply")))
+		if not meshes:
+			print(f"No meshes in {run}/meshes: skipped")
 			continue
-		config = leggi_config_run(cartella_run)
-		cartella_png = os.path.join(cartella_run, "screenshots")
-		os.makedirs(cartella_png, exist_ok=True)
-		print(f"{cartella_run}: {len(mesh)} mesh")
-		for percorso in mesh:
-			nome = os.path.splitext(os.path.basename(percorso))[0]  # <id>_<metodo>[_sw]
-			id_terreno = nome.removesuffix("_sw").rsplit("_", 1)[0]  # i nomi dei metodi non hanno "_"
-			if args.solo and id_terreno not in args.solo:
+		config = read_run_config(run)
+		png_folder = os.path.join(run, "screenshots")
+		os.makedirs(png_folder, exist_ok=True)
+		print(f"{run}: {len(meshes)} meshes")
+		for path in meshes:
+			name = os.path.splitext(os.path.basename(path))[0]  # <id>_<method>[_sw]
+			terrain_id = name.removesuffix("_sw").rsplit("_", 1)[0]  # method names have no "_"
+			if args.only and terrain_id not in args.only:
 				continue
-			fondale = fondale_terreno(config, id_terreno, cache_gt)
-			bbox = fondale.get_axis_aligned_bounding_box() if fondale is not None else None
-			nome_png = f"{nome}{suffisso_vista}.png"
-			if screenshot(o3d.io.read_triangle_mesh(percorso), os.path.join(cartella_png, nome_png), bbox,
-						  args.larghezza, args.altezza, VISTE[args.vista]):
-				print(f"  {nome_png}")
-			if args.ground_truth and fondale is not None and id_terreno not in terreni_fatti:
-				terreni_fatti.add(id_terreno)
-				nome_gt = f"{id_terreno}_ground_truth{suffisso_vista}.png"
+			seabed = terrain_seabed(config, terrain_id, gt_cache)
+			bbox = seabed.get_axis_aligned_bounding_box() if seabed is not None else None
+			png_name = f"{name}{view_suffix}.png"
+			if screenshot(o3d.io.read_triangle_mesh(path), os.path.join(png_folder, png_name), bbox,
+						  args.width, args.height, VIEWS[args.view]):
+				print(f"  {png_name}")
+			if args.ground_truth and seabed is not None and terrain_id not in done_terrains:
+				done_terrains.add(terrain_id)
+				gt_name = f"{terrain_id}_ground_truth{view_suffix}.png"
 				os.makedirs(args.ground_truth, exist_ok=True)
-				if screenshot(fondale, os.path.join(args.ground_truth, nome_gt), bbox,
-							  args.larghezza, args.altezza, VISTE[args.vista]):
-					print(f"  {os.path.join(args.ground_truth, nome_gt)}")
-		print(f"  -> {cartella_png}")
+				if screenshot(seabed, os.path.join(args.ground_truth, gt_name), bbox,
+							  args.width, args.height, VIEWS[args.view]):
+					print(f"  {os.path.join(args.ground_truth, gt_name)}")
+		print(f"  -> {png_folder}")
 
 
 if __name__ == "__main__":

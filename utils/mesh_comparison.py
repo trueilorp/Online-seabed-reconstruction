@@ -1,226 +1,167 @@
+"""Legacy comparison of reconstructed meshes with the Unity ground truth: accuracy, completeness and coverage
+table, a cross-section profile and distance histograms (set the paths below)."""
+
+import os
+
+import matplotlib
 import numpy as np
-import pandas as pd
 import open3d as o3d
-import matplotlib, os
-matplotlib.use("Agg")  # headless: nessuna dipendenza grafica (WSL senza display)
+import pandas as pd
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# --- Imposta qui i percorsi ---
-DATASET = "Terrain_unity"  # nome del CSV di input (senza estensione): sottocartella di output/mesh e output/comparison
-OUTPUT_DIR = f"output/comparison/{DATASET}"  # cartella dove salvare i PNG generati (creata se non esiste)
+DATASET = "Terrain_unity"
+OUTPUT_DIR = f"output/comparison/{DATASET}"
 GROUND_TRUTH_PATH = "data/sonar/Terrain_ground_truth.obj"
-METODI = {
+METHODS = {
 	"poisson": f"output/mesh/{DATASET}/mesh_poisson.ply",
 	"ppsurf": f"output/mesh/{DATASET}/mesh_ppsurf.ply",
 }
-N_PUNTI_ERRORE = 100_000       # punti campionati per la heatmap/istogramma (sia da GT che dalle mesh ricostruite)
-N_PUNTI_SEZIONE = 100          # risoluzione del profilo di sezione
-Z_SEZIONE = None               # None = usa il centro del ground truth; oppure un valore specifico
-SOGLIA_COPERTURA = 0.5         # distanza (m) sotto la quale un punto GT è considerato "coperto" dalla ricostruzione
+N_ERROR_POINTS = 100_000      # points sampled for the histograms (on the GT and on each mesh)
+N_SECTION_POINTS = 100        # resolution of the cross-section profile
+Z_SECTION = None              # None = centre of the ground truth
+COVERAGE_THRESHOLD = 0.5      # distance (m) below which a GT point counts as covered
 OUTPUT_PREFIX = "comparison"
-METRICHE_CSV = f"{OUTPUT_DIR}/metriche_accuratezza_completezza.csv"
 
 
-def crea_scena_raycasting(mesh: o3d.geometry.TriangleMesh) -> o3d.t.geometry.RaycastingScene:
-	mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+def make_raycasting_scene(mesh: o3d.geometry.TriangleMesh) -> o3d.t.geometry.RaycastingScene:
 	scene = o3d.t.geometry.RaycastingScene()
-	scene.add_triangles(mesh_t)
+	scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
 	return scene
 
 
-def carica_mesh(percorso: str) -> o3d.geometry.TriangleMesh:
-	mesh = o3d.io.read_triangle_mesh(percorso)
+def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
+	mesh = o3d.io.read_triangle_mesh(path)
 	if len(mesh.vertices) == 0:
-		raise ValueError(f"'{percorso}' non contiene vertici o non è stato trovato.")
+		raise ValueError(f"'{path}' has no vertices or was not found.")
 	return mesh
 
 
-# ---------------------------------------------------------------------------
-# 1. Metriche: accuratezza, completezza, copertura
-# ---------------------------------------------------------------------------
-#
-# Due direzioni di misura, che NON sono intercambiabili:
-#
-#   COMPLETEZZA (verita' -> ricostruzione): campiona punti sul ground truth,
-#     misura quanto sono lontani dalla superficie ricostruita. Penalizza i
-#     BUCHI (zone del vero terreno non coperte dalla mesh).
-#
-#   ACCURATEZZA (ricostruzione -> verita'): campiona punti sulla mesh
-#     ricostruita, misura quanto sono lontani dal vero terreno. NON vede i
-#     buchi (non campiona mai un punto dove non c'e' mesh) -- un metodo puo'
-#     "barare" qui tagliando via le zone incerte, migliorando l'accuratezza
-#     a scapito della completezza.
-#
-# Un metodo puo' essere ottimo su una e pessimo sull'altra (visto con
-# Poisson molto tarato: accuratezza alta, completezza bassa per via dei
-# buchi introdotti da rimuovi_bassa_densita alto). Vanno sempre riportate
-# insieme, mai una sola.
+# Completeness (GT -> reconstruction) penalises holes; accuracy (reconstruction -> GT) does not see them,
+# so a method can trade one for the other: always report both.
 
-def calcola_completezza(scene_metodo: o3d.t.geometry.RaycastingScene,
-						 punti_gt: np.ndarray) -> np.ndarray:
-	"""Per ogni punto del ground truth, distanza dalla superficie ricostruita."""
-	query = o3d.core.Tensor(punti_gt, dtype=o3d.core.Dtype.Float32)
-	return scene_metodo.compute_distance(query).numpy()
+def completeness(method_scene: o3d.t.geometry.RaycastingScene, gt_points: np.ndarray) -> np.ndarray:
+	"""Distance of each ground-truth point from the reconstructed surface."""
+	return method_scene.compute_distance(o3d.core.Tensor(gt_points, dtype=o3d.core.Dtype.Float32)).numpy()
 
 
-def calcola_accuratezza(mesh_metodo: o3d.geometry.TriangleMesh,
-						 scene_gt: o3d.t.geometry.RaycastingScene,
-						 n_punti: int) -> np.ndarray:
-	"""Per ogni punto campionato sulla mesh ricostruita, distanza dal ground truth."""
-	pcd_metodo = mesh_metodo.sample_points_uniformly(number_of_points=n_punti)
-	query = o3d.core.Tensor(np.asarray(pcd_metodo.points), dtype=o3d.core.Dtype.Float32)
-	return scene_gt.compute_distance(query).numpy()
+def accuracy(method_mesh: o3d.geometry.TriangleMesh, gt_scene: o3d.t.geometry.RaycastingScene,
+			 n_points: int) -> np.ndarray:
+	"""Distance of each point sampled on the reconstructed mesh from the ground truth."""
+	pcd = method_mesh.sample_points_uniformly(number_of_points=n_points)
+	return gt_scene.compute_distance(o3d.core.Tensor(np.asarray(pcd.points), dtype=o3d.core.Dtype.Float32)).numpy()
 
 
-def calcola_copertura_percentuale(distanze_completezza: np.ndarray, soglia: float) -> float:
-	"""% di punti del ground truth che hanno una ricostruzione entro 'soglia' metri."""
-	return 100.0 * np.mean(distanze_completezza <= soglia)
+def coverage_percent(completeness_distances: np.ndarray, threshold: float) -> float:
+	"""% of ground-truth points with a reconstruction within threshold metres."""
+	return 100.0 * np.mean(completeness_distances <= threshold)
 
 
-def calcola_tutte_le_metriche(mesh_gt, scene_gt, punti_gt_campionati, metodi_mesh_scene):
-	"""
-	metodi_mesh_scene: dict nome -> (mesh, scene) per ciascun metodo.
-	Ritorna: (completezza_per_metodo, accuratezza_per_metodo, tabella_riassuntiva)
-	"""
-	completezza_per_metodo = {}
-	accuratezza_per_metodo = {}
-	righe_tabella = []
-
-	for nome, (mesh, scene) in metodi_mesh_scene.items():
-		distanze_completezza = calcola_completezza(scene, punti_gt_campionati)
-		distanze_accuratezza = calcola_accuratezza(mesh, scene_gt, N_PUNTI_ERRORE)
-		copertura_pct = calcola_copertura_percentuale(distanze_completezza, SOGLIA_COPERTURA)
-
-		completezza_per_metodo[nome] = distanze_completezza
-		accuratezza_per_metodo[nome] = distanze_accuratezza
-
-		righe_tabella.append({
-			"metodo": nome,
-			"accuratezza_media": distanze_accuratezza.mean(),
-			"accuratezza_rms": np.sqrt(np.mean(distanze_accuratezza ** 2)),
-			"completezza_media": distanze_completezza.mean(),
-			"completezza_rms": np.sqrt(np.mean(distanze_completezza ** 2)),
-			"completezza_hausdorff": distanze_completezza.max(),
-			f"copertura_pct_entro_{SOGLIA_COPERTURA}m": copertura_pct,
+def compute_all_metrics(gt_scene, gt_points, method_meshes_scenes):
+	"""method_meshes_scenes: name -> (mesh, scene). Returns (completeness per method, accuracy per method, table)."""
+	completeness_per_method, accuracy_per_method, rows = {}, {}, []
+	for name, (mesh, scene) in method_meshes_scenes.items():
+		d_comp = completeness(scene, gt_points)
+		d_acc = accuracy(mesh, gt_scene, N_ERROR_POINTS)
+		completeness_per_method[name] = d_comp
+		accuracy_per_method[name] = d_acc
+		rows.append({
+			"method": name,
+			"accuracy_mean": d_acc.mean(),
+			"accuracy_rms": np.sqrt(np.mean(d_acc ** 2)),
+			"completeness_mean": d_comp.mean(),
+			"completeness_rms": np.sqrt(np.mean(d_comp ** 2)),
+			"completeness_hausdorff": d_comp.max(),
+			f"coverage_pct_within_{COVERAGE_THRESHOLD}m": coverage_percent(d_comp, COVERAGE_THRESHOLD),
 		})
-
-	tabella = pd.DataFrame(righe_tabella)
-	return completezza_per_metodo, accuratezza_per_metodo, tabella
+	return completeness_per_method, accuracy_per_method, pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# 2. Profilo di sezione (taglio verticale) -- invariato
-# ---------------------------------------------------------------------------
-
-def altezza_lungo_linea(scene: o3d.t.geometry.RaycastingScene, x_valori: np.ndarray,
-						 z_fisso: float, y_partenza: float) -> np.ndarray:
-	n = len(x_valori)
-	origini = np.stack([x_valori, np.full(n, y_partenza), np.full(n, z_fisso)], axis=1)
-	direzioni = np.tile([0.0, -1.0, 0.0], (n, 1))
-	rays = o3d.core.Tensor(np.concatenate([origini, direzioni], axis=1), dtype=o3d.core.Dtype.Float32)
-
-	risultato = scene.cast_rays(rays)
-	t_hit = risultato["t_hit"].numpy()
-
-	altezze = y_partenza - t_hit  # NaN/inf dove non c'è intersezione (nessun dato lì)
-	altezze[np.isinf(altezze)] = np.nan
-	return altezze
+def height_along_line(scene: o3d.t.geometry.RaycastingScene, x_values: np.ndarray,
+					  z_fixed: float, y_start: float) -> np.ndarray:
+	n = len(x_values)
+	origins = np.stack([x_values, np.full(n, y_start), np.full(n, z_fixed)], axis=1)
+	directions = np.tile([0.0, -1.0, 0.0], (n, 1))
+	rays = o3d.core.Tensor(np.concatenate([origins, directions], axis=1), dtype=o3d.core.Dtype.Float32)
+	heights = y_start - scene.cast_rays(rays)["t_hit"].numpy()
+	heights[np.isinf(heights)] = np.nan  # no surface there
+	return heights
 
 
-def genera_profilo_sezione(scene_gt, scene_metodi, bbox_gt):
-	min_gt, max_gt = bbox_gt
-	z_sezione = Z_SEZIONE if Z_SEZIONE is not None else (min_gt[2] + max_gt[2]) / 2
-	x_valori = np.linspace(min_gt[0], max_gt[0], N_PUNTI_SEZIONE)
-	y_partenza = max_gt[1] + 10  # sopra tutto, per essere sicuri di partire fuori dalla mesh
-
-	altezze_gt = altezza_lungo_linea(scene_gt, x_valori, z_sezione, y_partenza)
+def section_profile(gt_scene, method_scenes, gt_bbox):
+	gt_min, gt_max = gt_bbox
+	z_section = Z_SECTION if Z_SECTION is not None else (gt_min[2] + gt_max[2]) / 2
+	x_values = np.linspace(gt_min[0], gt_max[0], N_SECTION_POINTS)
+	y_start = gt_max[1] + 10  # above everything, to start outside the mesh
 
 	fig, ax = plt.subplots(figsize=(12, 5))
-	ax.plot(x_valori, altezze_gt, linestyle=":", color="lightgray", linewidth=2.5, label="Ground truth", zorder=10)
-
-	stili = ["--", ":", "-.", "-"]
-	for (nome, scene), stile in zip(scene_metodi.items(), stili):
-		altezze = altezza_lungo_linea(scene, x_valori, z_sezione, y_partenza)
-		ax.plot(x_valori, altezze, stile, linewidth=1.8, label=nome)
+	ax.plot(x_values, height_along_line(gt_scene, x_values, z_section, y_start), linestyle=":",
+			color="lightgray", linewidth=2.5, label="Ground truth", zorder=10)
+	for (name, scene), style in zip(method_scenes.items(), ["--", ":", "-.", "-"]):
+		ax.plot(x_values, height_along_line(scene, x_values, z_section, y_start), style, linewidth=1.8, label=name)
 
 	ax.set_xlabel("X")
-	ax.set_ylabel("Altezza (Y)")
-	ax.set_title(f"Profilo di sezione a Z = {z_sezione:.2f}\n"
-				 f"(linee interrotte = nessun dato/nessuna superficie ricostruita in quel punto)")
+	ax.set_ylabel("Height (Y)")
+	ax.set_title(f"Cross-section at Z = {z_section:.2f}\n(gaps = no reconstructed surface at that point)")
 	ax.legend()
 	ax.grid(alpha=0.3)
 	plt.tight_layout()
 	os.makedirs(OUTPUT_DIR, exist_ok=True)
-	percorso_out = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}_profilo_sezione.png")
-	plt.savefig(percorso_out, dpi=150)
+	out = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}_section_profile.png")
+	plt.savefig(out, dpi=150)
 	plt.close(fig)
-	print(f"Profilo di sezione salvato in: {percorso_out}")
+	print(f"Cross-section saved to: {out}")
 
 
-# ---------------------------------------------------------------------------
-# 3. Istogrammi -- ora uno per completezza e uno per accuratezza
-# ---------------------------------------------------------------------------
-
-def genera_istogramma(errori_per_metodo: dict, titolo: str, nome_file: str):
+def histogram(errors_per_method: dict, title: str, file_name: str):
 	fig, ax = plt.subplots(figsize=(9, 5))
-	for nome, distanze in errori_per_metodo.items():
-		ax.hist(distanze, bins=80, alpha=0.55, label=f"{nome} (media {distanze.mean():.3f} m)",
-				 range=(0, np.percentile(distanze, 99)))
-	ax.set_xlabel("Distanza (m)")
-	ax.set_ylabel("Conteggio punti")
-	ax.set_title(titolo)
+	for name, distances in errors_per_method.items():
+		ax.hist(distances, bins=80, alpha=0.55, label=f"{name} (mean {distances.mean():.3f} m)",
+				range=(0, np.percentile(distances, 99)))
+	ax.set_xlabel("Distance (m)")
+	ax.set_ylabel("Point count")
+	ax.set_title(title)
 	ax.legend()
 	plt.tight_layout()
 	os.makedirs(OUTPUT_DIR, exist_ok=True)
-	percorso_out = os.path.join(OUTPUT_DIR, nome_file)
-	plt.savefig(percorso_out, dpi=150)
+	out = os.path.join(OUTPUT_DIR, file_name)
+	plt.savefig(out, dpi=150)
 	plt.close(fig)
-	print(f"Istogramma salvato in: {percorso_out}")
+	print(f"Histogram saved to: {out}")
 
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
 
 def main():
-	print(f"Carico ground truth: {GROUND_TRUTH_PATH}")
-	mesh_gt = carica_mesh(GROUND_TRUTH_PATH)
-	scene_gt = crea_scena_raycasting(mesh_gt)
+	print(f"Loading ground truth: {GROUND_TRUTH_PATH}")
+	gt_mesh = load_mesh(GROUND_TRUTH_PATH)
+	gt_scene = make_raycasting_scene(gt_mesh)
+	gt_vertices = np.asarray(gt_mesh.vertices)
+	gt_bbox = (gt_vertices.min(axis=0), gt_vertices.max(axis=0))
+	gt_points = np.asarray(gt_mesh.sample_points_uniformly(number_of_points=N_ERROR_POINTS).points)
 
-	vertici_gt = np.asarray(mesh_gt.vertices)
-	bbox_gt = (vertici_gt.min(axis=0), vertici_gt.max(axis=0))
+	method_meshes_scenes, method_scenes = {}, {}
+	for name, path in METHODS.items():
+		print(f"Loading {name}: {path}")
+		mesh = load_mesh(path)
+		scene = make_raycasting_scene(mesh)
+		method_meshes_scenes[name] = (mesh, scene)
+		method_scenes[name] = scene
 
-	pcd_gt_campionata = mesh_gt.sample_points_uniformly(number_of_points=N_PUNTI_ERRORE)
-	punti_gt = np.asarray(pcd_gt_campionata.points)
+	print("\nComputing accuracy, completeness and coverage for each method...")
+	completeness_per_method, accuracy_per_method, _ = compute_all_metrics(gt_scene, gt_points, method_meshes_scenes)
 
-	metodi_mesh_scene = {}
-	scene_metodi = {}  # solo per il profilo di sezione, che serve solo le scene
-	for nome, percorso in METODI.items():
-		print(f"Carico {nome}: {percorso}")
-		mesh = carica_mesh(percorso)
-		scene = crea_scena_raycasting(mesh)
-		metodi_mesh_scene[nome] = (mesh, scene)
-		scene_metodi[nome] = scene
+	print("\nCross-section profile...")
+	section_profile(gt_scene, method_scenes, gt_bbox)
 
-	print("\nCalcolo accuratezza, completezza e copertura per ciascun metodo...")
-	completezza_per_metodo, accuratezza_per_metodo, tabella = calcola_tutte_le_metriche(
-		mesh_gt, scene_gt, punti_gt, metodi_mesh_scene
-	)
+	print("\nCompleteness histogram (GT -> reconstruction, penalises holes)...")
+	histogram(completeness_per_method, "Completeness: distance from the ground truth to the nearest reconstruction",
+			  f"{OUTPUT_PREFIX}_completeness_histogram.png")
 
-	print("\nGenero profilo di sezione...")
-	genera_profilo_sezione(scene_gt, scene_metodi, bbox_gt)
+	print("\nAccuracy histogram (reconstruction -> GT, blind to holes)...")
+	histogram(accuracy_per_method, "Accuracy: distance from the reconstruction to the nearest ground truth",
+			  f"{OUTPUT_PREFIX}_accuracy_histogram.png")
 
-	print("\nGenero istogramma di completezza (verità -> ricostruzione, penalizza i buchi)...")
-	genera_istogramma(completezza_per_metodo,
-					   "Completezza: distanza dal ground truth alla ricostruzione più vicina",
-					   f"{OUTPUT_PREFIX}_istogramma_completezza.png")
-
-	print("\nGenero istogramma di accuratezza (ricostruzione -> verità, cieco ai buchi)...")
-	genera_istogramma(accuratezza_per_metodo,
-					   "Accuratezza: distanza dalla ricostruzione al ground truth più vicino",
-					   f"{OUTPUT_PREFIX}_istogramma_accuratezza.png")
-
-	print(f"\nFatto. Apri i PNG generati in {OUTPUT_DIR}/ da Windows/VS Code.")
+	print(f"\nDone. PNGs in {OUTPUT_DIR}/")
 
 
 if __name__ == "__main__":

@@ -1,28 +1,15 @@
 """
-Simula la scansione di un sensore multibeam su terreni sintetici e scrive, per ogni terreno:
-  <id>_scan.csv            nuvola di punti, stesso formato di Terrain_unity.csv:
-                           x,y,z,intensity,ping_number,elapsed_s   (Y verticale)
-  <id>_ground_truth.obj    mesh del terreno (verita'), stesse coordinate del CSV
-  <id>_scan.json           parametri della scansione e offset applicati
+Simulates a multibeam survey over the synthetic terrains of generate_seabed_heightmaps.py and writes, per
+terrain, <id>_scan.csv (x,y,z,intensity,ping_number,elapsed_s; Y vertical), <id>_ground_truth.obj (closed
+terrain mesh, same coordinates) and <id>_scan.json (scan parameters and offsets).
 
-Input: la cartella prodotta da generate_seabed_heightmaps.py (manifest.csv + split/<id>/<id>.raw).
+Simplified sensor model (not acoustic physics): lawn-mower path at constant depth, a fan of N_BEAMS rays per
+ping perpendicular to the track with random roll/pitch, exact raycasts on the full-resolution terrain, range
+noise, dropout and water-column outliers. Defaults estimated from OS3D_Max_Range_Test.csv (rate, speed,
+aperture), not from the datasheet; intensity is a proxy. To imitate the Unity sensor: MIN_RANGE=1,
+MAX_RANGE=50, RANGE_SIGMA=0.05, DROPOUT=0, OUTLIER_RATE=0.
 
-Modello del sensore (SEMPLIFICATO, non e' fisica acustica):
-  - piattaforma su una serpentina (lawn-mower) a quota costante SENSOR_Y
-  - a ogni ping, un ventaglio di N_BEAMS raggi nel piano perpendicolare alla rotta, da nadir
-    +-FAN_DEG/2, con un po' di roll/pitch casuale per ping
-  - ogni raggio e' un raycast esatto sulla mesh del terreno a piena risoluzione
-  - rumore sul range (gaussiano), dropout, outlier nella colonna d'acqua
-  - NON modellati: footprint del beam, multipath, ombre acustiche, attenuazione, errori di navigazione
-
-Parametri di default stimati da OS3D_Max_Range_Test.csv (analizza_ping_omniscan.py):
-  ping rate ~6 Hz (media; il sonar rallenta in acque profonde), ~276 punti per ping (mediana, dopo il
-  filtraggio di SonarView), velocita' ~1 m/s, apertura ~120 gradi (p75 118; ma varia con la profondita').
-  NON sono i valori della scheda tecnica. La colonna intensity e' un proxy, non backscatter reale.
-
-Per imitare il sensore Unity: MIN_RANGE=1, MAX_RANGE=50, RANGE_SIGMA=0.05, DROPOUT=0, OUTLIER_RATE=0.
-
-Uso:  python simulate_multibeam_scans.py     (modifica le variabili qui sotto)
+Usage: python utils/simulate_multibeam_scans.py   (parameters are the constants below)
 """
 import csv
 import json
@@ -32,67 +19,59 @@ import time
 import numpy as np
 import open3d as o3d
 
-# =============================================================================================
-# CONFIGURAZIONE
-# =============================================================================================
+# --- input / terrain selection
+DATASET_DIR = "data/synthetic"   # folder with manifest.csv (output of generate_seabed_heightmaps.py)
+ONLY = None                      # ids to process, e.g. ["rocky_000"]; None = all
+SPLITS = None                    # e.g. ["train", "val"]; None = all splits
+LIMIT = None                     # maximum number of terrains; None = no limit
+SEED = 0                         # global scan seed (with the terrain seed it determines everything)
 
-# --- Input / selezione terreni ---------------------------------------------------------------
-DATASET_DIR = "data/synthetic"   # cartella con manifest.csv (output di generate_seabed_heightmaps.py)
-ONLY = None                      # lista di id da elaborare, es. ["rocky_000"]; None = tutti
-SPLITS = None                    # es. ["train", "val"]; None = tutti gli split
-LIMIT = None                     # massimo numero di terreni (utile per i test); None = nessun limite
-SEED = 0                         # seed globale delle scansioni (con quello del terreno determina tutto)
-
-# --- Sensore (default da OS3D_Max_Range_Test.csv, vedi docstring) ----------------------------
-FAN_DEG = 120.0                  # apertura totale del ventaglio, gradi
-N_BEAMS = 200                    # beam (punti) per ping
-PING_RATE = 6.0                  # ping al secondo
+# --- sensor
+FAN_DEG = 120.0                  # total fan aperture, degrees
+N_BEAMS = 200                    # beams (points) per ping
+PING_RATE = 6.0                  # pings per second
 MIN_RANGE = 0.5                  # m
 MAX_RANGE = 50.0                 # m
-RANGE_SIGMA = 0.15               # rumore gaussiano sul range, m
-DROPOUT = 0.02                   # probabilita' che un raggio non produca ritorno
-OUTLIER_RATE = 0.005             # frazione di echi spuri nella colonna d'acqua (sempre sopra il fondale)
-ROLL_SIGMA_DEG = 0.3             # oscillazione di roll per ping, gradi
-PITCH_SIGMA_DEG = 0.2            # oscillazione di pitch per ping, gradi
-INTENSITY_SCALE = 4.0            # proxy: intensity = scala * cos(angolo di incidenza)
+RANGE_SIGMA = 0.15               # Gaussian range noise, m
+DROPOUT = 0.02                   # probability that a ray returns nothing
+OUTLIER_RATE = 0.005             # fraction of spurious echoes in the water column (always above the seabed)
+ROLL_SIGMA_DEG = 0.3             # roll jitter per ping, degrees
+PITCH_SIGMA_DEG = 0.2            # pitch jitter per ping, degrees
+INTENSITY_SCALE = 4.0            # proxy: intensity = scale * cos(incidence angle)
 
-# --- Rilievo ---------------------------------------------------------------------------------
-SPEED = 1.0                      # velocita' della piattaforma, m/s (spaziatura lungo rotta = SPEED/PING_RATE)
-OVERLAP = 0.3                    # sovrapposizione tra passate adiacenti (0-1)
-MAX_LINES = 40                   # massimo numero di passate
-SENSOR_Y = -0.5                  # quota Y del sensore (come il sensore sotto lo scafo in Unity)
-MEAN_DEPTH = 8.0                 # profondita' media del fondale, m sotto Y=0
-CLEARANCE = 2.0                  # distanza minima tra sensore e cima del terreno, m
+# --- survey
+SPEED = 1.0                      # platform speed, m/s (along-track spacing = SPEED/PING_RATE)
+OVERLAP = 0.3                    # overlap between adjacent lines (0-1)
+MAX_LINES = 40                   # maximum number of lines
+SENSOR_Y = -0.5                  # sensor Y (like the sensor under the hull in Unity)
+MEAN_DEPTH = 8.0                 # mean seabed depth, m below Y=0
+CLEARANCE = 2.0                  # minimum distance between sensor and terrain top, m
 
-# --- Ground truth ----------------------------------------------------------------------------
-GT_STEP = 2                      # sottocampionamento griglia GT (1 = piena risoluzione; deve dividere resolution-1)
-CLOSED_GT = True                 # True = mesh chiusa con pareti e fondo (per metodi a occupancy)
-BASE_THICKNESS = 1.0             # spessore della base se CLOSED_GT, m
+# --- ground truth
+GT_STEP = 2                      # GT grid subsampling (1 = full resolution; must divide resolution-1)
+CLOSED_GT = True                 # True = closed mesh with walls and bottom (for occupancy methods)
+BASE_THICKNESS = 1.0             # base thickness if CLOSED_GT, m
 
 CSV_HEADER = "x,y,z,intensity,ping_number,elapsed_s"
 
 
-# =============================================================================================
-# Mesh del terreno
-# =============================================================================================
-
 def load_heightmap(path: str, res: int, height_range: float) -> np.ndarray:
     raw = np.fromfile(path, dtype="<u2")
     if raw.size != res * res:
-        raise ValueError(f"{path}: attesi {res * res} valori, trovati {raw.size}")
+        raise ValueError(f"{path}: expected {res * res} values, found {raw.size}")
     return raw.reshape(res, res).astype(np.float64) / 65535.0 * height_range
 
 
 def grid_vertices(h: np.ndarray, size: float, y_shift: float, step: int = 1) -> np.ndarray:
     res = h.shape[0]
     xs = np.linspace(-size / 2, size / 2, res)[::step]
-    X, Z = np.meshgrid(xs, xs)  # X[r, c] = xs[c], Z[r, c] = xs[r]  (riga <-> Z, colonna <-> X)
+    X, Z = np.meshgrid(xs, xs)  # X[r, c] = xs[c], Z[r, c] = xs[r]  (row <-> Z, column <-> X)
     Y = h[::step, ::step] + y_shift
     return np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
 
 
 def grid_faces(n: int) -> np.ndarray:
-    """Triangoli di una griglia n x n, orientati con la normale verso +Y."""
+    """Triangles of an n x n grid, with normals towards +Y."""
     r, c = np.meshgrid(np.arange(n - 1), np.arange(n - 1), indexing="ij")
     a = (r * n + c).ravel()
     b, cc, d = a + 1, a + n, a + n + 1
@@ -100,12 +79,12 @@ def grid_faces(n: int) -> np.ndarray:
 
 
 def close_mesh(verts: np.ndarray, faces: np.ndarray, n: int, thickness: float):
-    """Aggiunge pareti laterali e fondo (ventaglio dal centro): mesh chiusa e orientata."""
+    """Adds side walls and a bottom (fan from the centre): closed, oriented mesh."""
     loop = np.concatenate([
-        np.arange(0, n),                           # riga 0, colonne crescenti
-        np.arange(1, n) * n + (n - 1),             # ultima colonna, righe crescenti
-        (n - 1) * n + np.arange(n - 2, -1, -1),    # ultima riga, colonne decrescenti
-        np.arange(n - 2, 0, -1) * n,               # prima colonna, righe decrescenti
+        np.arange(0, n),                           # row 0, increasing columns
+        np.arange(1, n) * n + (n - 1),             # last column, increasing rows
+        (n - 1) * n + np.arange(n - 2, -1, -1),    # last row, decreasing columns
+        np.arange(n - 2, 0, -1) * n,               # first column, decreasing rows
     ])
     L = len(loop)
     y_bot = verts[:, 1].min() - thickness
@@ -138,13 +117,9 @@ def make_scene(verts: np.ndarray, faces: np.ndarray) -> o3d.t.geometry.Raycastin
     return scene
 
 
-# =============================================================================================
-# Rilievo
-# =============================================================================================
-
 def choose_y_shift(h: np.ndarray) -> float:
-    """Profondita' media del fondale = MEAN_DEPTH, ma la cima del terreno resta almeno
-    CLEARANCE metri sotto il sensore (altrimenti il sensore finirebbe dentro la roccia)."""
+    """Mean seabed depth = MEAN_DEPTH, but the terrain top stays at least CLEARANCE metres below the
+    sensor (otherwise the sensor would end up inside the rock)."""
     shift = -MEAN_DEPTH - h.mean()
     top_limit = SENSOR_Y - CLEARANCE
     if h.max() + shift > top_limit:
@@ -169,7 +144,7 @@ def simulate(scene, z_lines, x_pings, rng) -> np.ndarray:
     chunks = []
     ping_counter = 0
     for li, zl in enumerate(z_lines):
-        xs = x_pings if li % 2 == 0 else x_pings[::-1]  # serpentina
+        xs = x_pings if li % 2 == 0 else x_pings[::-1]  # lawn-mower
         npg = len(xs)
         roll = np.deg2rad(rng.normal(0.0, ROLL_SIGMA_DEG, npg))
         pitch = np.deg2rad(rng.normal(0.0, PITCH_SIGMA_DEG, npg))
@@ -195,8 +170,7 @@ def simulate(scene, z_lines, x_pings, rng) -> np.ndarray:
         t_noisy = t + rng.normal(0.0, RANGE_SIGMA, t.shape)
         valid = hit & (rng.random(t.shape) >= DROPOUT)
 
-        # echi spuri nella colonna d'acqua: solo sui raggi che colpiscono il fondale e sempre
-        # PRIMA di esso (un eco oltre il fondale o fuori dal terreno non avrebbe senso fisico)
+        # water-column echoes: only on rays that hit the seabed, and always before it
         out_mask = (rng.random(t.shape) < OUTLIER_RATE) & hit
         t_out = rng.uniform(MIN_RANGE, np.maximum(np.where(hit, t, MAX_RANGE), MIN_RANGE + 1e-3))
         t_use = np.where(out_mask, t_out, t_noisy)
@@ -216,10 +190,6 @@ def write_csv(path: str, arr: np.ndarray):
                fmt=["%.5f", "%.5f", "%.5f", "%.4f", "%d", "%.6f"])
 
 
-# =============================================================================================
-# MAIN
-# =============================================================================================
-
 def main():
     with open(os.path.join(DATASET_DIR, "manifest.csv")) as f:
         rows = list(csv.DictReader(f))
@@ -230,7 +200,7 @@ def main():
     if LIMIT:
         rows = rows[:LIMIT]
     if not rows:
-        raise SystemExit("nessun terreno selezionato")
+        raise SystemExit("no terrain selected")
 
     sensor_params = dict(fan_deg=FAN_DEG, n_beams=N_BEAMS, ping_rate=PING_RATE, min_range=MIN_RANGE,
                          max_range=MAX_RANGE, range_sigma=RANGE_SIGMA, dropout=DROPOUT,
@@ -243,7 +213,7 @@ def main():
         size = float(r["size_m"])
         hr = float(r["height_range_m"])
         if (res - 1) % GT_STEP != 0:
-            raise SystemExit(f"GT_STEP={GT_STEP} non divide resolution-1 = {res - 1}")
+            raise SystemExit(f"GT_STEP={GT_STEP} does not divide resolution-1 = {res - 1}")
         d = os.path.join(DATASET_DIR, os.path.dirname(r["raw"]))
         h = load_heightmap(os.path.join(DATASET_DIR, r["raw"]), res, hr)
         y_shift = choose_y_shift(h)
@@ -262,14 +232,14 @@ def main():
         if CLOSED_GT:
             vg, fg = close_mesh(vg, fg, n_gt, BASE_THICKNESS)
         write_obj(os.path.join(d, f"{r['id']}_ground_truth.obj"), vg, fg,
-                  f"ground truth {r['id']} (griglia {n_gt}x{n_gt}, y_shift={y_shift:.3f}, chiusa={CLOSED_GT})")
+                  f"ground truth {r['id']} (grid {n_gt}x{n_gt}, y_shift={y_shift:.3f}, closed={CLOSED_GT})")
 
         meta = dict(id=r["id"], terrain_seed=int(r["seed"]), scan_seed=SEED, y_shift=y_shift,
                     n_points=int(len(pts)), n_lines=int(len(z_lines)), n_pings_per_line=int(len(x_pings)),
                     swath_m=float(swath), gt_grid=n_gt, gt_closed=CLOSED_GT, sensor=sensor_params)
         with open(os.path.join(d, f"{r['id']}_scan.json"), "w") as f:
             json.dump(meta, f, indent=2)
-        print(f"[{r['split']:5s}] {r['id']:18s} punti={len(pts):8d}  linee={len(z_lines)}  "
+        print(f"[{r['split']:5s}] {r['id']:18s} points={len(pts):8d}  lines={len(z_lines)}  "
               f"swath={swath:5.1f} m  y_shift={y_shift:7.2f}  {time.time() - t0:5.1f}s")
 
 

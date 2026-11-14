@@ -15,6 +15,7 @@ the experiment notes are in [ANALYSIS.md](ANALYSIS.md).
 1. [Installation](#1-installation)
 2. [Synthetic data](#2-synthetic-data)
 3. [Usage](#3-usage)
+4. [Contacts](#contacts)
 
 ## 1. Installation
 
@@ -106,7 +107,7 @@ python evaluate.py --split val --limit 1 --methods ppsurf
 ```
 
 Each command creates `output/evaluation/<date_time>_val/`. Check that
-`metriche_per_terreno.csv` has 6 rows with an empty `errore` (error) column,
+`metrics_per_terrain.csv` has 6 rows with an empty `error` column,
 and that `meshes/` contains 6 `.ply` files. Poisson takes a few seconds per
 terrain. PPSurf takes 38–43 s per terrain on a GTX TITAN X with
 `rec_batch_size=50000`, and longer with the default 10000; the first run also
@@ -126,7 +127,7 @@ python utils/simulate_multibeam_scans.py
   and pillars, split per terrain. `--n-per-family 17` with the default seed
   (`--seed 0`) reproduces the current dataset. It ends with:
   ```
-  Generati 102 terreni -> data/synthetic  (train 72, val 18, test 12)
+  Generated 102 terrains -> data/synthetic  (train 72, val 18, test 12)
   ```
 - `simulate_multibeam_scans.py` reads `data/synthetic/manifest.csv` and writes,
   in each `data/synthetic/<split>/<id>/` folder:
@@ -173,10 +174,10 @@ python evaluate.py --methods ppsurf  --split test+val --sliding_window on --set 
 | `--split {train,val,test,test+val}` | data split; default from `evaluation.split` (`test+val`) |
 | `--methods poisson ppsurf` | methods to run, in sequence on each terrain; default both |
 | `--limit N` | the first N terrains **of each family** (alphabetical order), not N in total |
-| `--sliding_window {on,off}` | overrides `sliding_window.abilitato` ("enabled") |
-| `--set SECTION.KEY=VALUE ...` | overrides any config value for this run, e.g. `--set ppsurf.gen_refine_iter=5 poisson.profondita=8`; repeatable |
-| `--tau T` | threshold in metres (default `evaluation.tau`, 0.5); several values only with `--ricalcola` |
-| `--ricalcola RUN_FOLDER` | "recompute": no reconstruction; recomputes Chamfer, precision, recall and F-score for each `--tau` from the raw distances of an existing run |
+| `--sliding_window {on,off}` | overrides `sliding_window.enabled` |
+| `--set SECTION.KEY=VALUE ...` | overrides any config value for this run, e.g. `--set ppsurf.gen_refine_iter=5 poisson.depth=8`; repeatable |
+| `--tau T` | threshold in metres (default `evaluation.tau`, 0.5); several values only with `--recompute` |
+| `--recompute RUN_FOLDER` | no reconstruction; recomputes Chamfer, precision, recall and F-score for each `--tau` from the raw distances of an existing run |
 
 Without arguments, `evaluate.py` uses the defaults of the `evaluation` section
 of the config (`test+val`, all terrains, Poisson and PPSurf, full scan).
@@ -184,7 +185,7 @@ of the config (`test+val`, all terrains, Poisson and PPSurf, full scan).
 **Metrics at other thresholds**, without reconstructing:
 
 ```bash
-python evaluate.py --ricalcola output/evaluation/<run> --tau 0.1 0.2 0.5
+python evaluate.py --recompute output/evaluation/<run> --tau 0.1 0.2 0.5
 ```
 
 **Screenshots** of every mesh of one or more runs, with the same camera for
@@ -193,28 +194,16 @@ ground truth (written to `output/groundtruth/`):
 
 ```bash
 python visualization/screenshot_run.py output/evaluation/<run1> output/evaluation/<run2>
-python visualization/screenshot_run.py --ground_truth --dati data/synthetic/test+val
+python visualization/screenshot_run.py --ground_truth --data data/synthetic/test+val
 ```
 
-**Interactive viewer** for one mesh (the path is set in `PERCORSO_MESH` at the
+**Interactive viewer** for one mesh (the path is set in `MESH_PATH` at the
 top of the file):
 
 ```bash
 python visualization/visualize_mesh.py
 ```
 
-**Figures and report.** Each plot script takes the four run folders (or the
-two SW runs for `plot_rtf.py`) and writes to `imgs/`:
+## Contacts
 
-```bash
-RUNS="--poisson    output/evaluation/<poisson_run> \
-      --ppsurf     output/evaluation/<ppsurf_run> \
-      --poisson_sw output/evaluation/<poisson_sw_run> \
-      --ppsurf_sw  output/evaluation/<ppsurf_sw_run>"
-python visualization/plot_chamfer.py $RUNS
-python visualization/plot_tau.py $RUNS                # uses the τ values computed by --ricalcola
-python visualization/plot_confronto_mesh.py $RUNS     # needs the screenshots above
-python visualization/plot_rtf.py --poisson_sw output/evaluation/<poisson_sw_run> \
-                                 --ppsurf_sw  output/evaluation/<ppsurf_sw_run>
-bash report/compila.sh                                # LaTeX sources (not in git) -> report.pdf
-```
+Simone Dario ([simone.dario@univr.it](mailto:simone.dario@univr.it)), Università degli Studi di Verona

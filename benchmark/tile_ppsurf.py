@@ -1,37 +1,15 @@
 """
-PPSurf a porzioni: il terreno viene diviso in quadrati XZ, ricostruiti separatamente e riuniti.
+Tiled PPSurf: the terrain is split into XZ squares, reconstructed separately (all in one PPSurf subprocess, dataset
+mode of pps.py) and merged. The double-shell thickness is ~1% of the scene side, so small squares thin it; the
+middle layer removes the rest. Each square gets its core plus a margin per side; the margins are discarded when
+merging. Variants measured against the GT seabed: tile_original, tile_middle, full_original / full_middle (the
+PPSurf mesh of the latest evaluate.py run, if present) and poisson (if present).
 
-PPSurf normalizza ogni point cloud nel cubo unitario, e lo spessore del guscio doppio risulta
-~1% del lato della scena qualunque sia la griglia di marching cubes (terreno di 100 m: ~0.9 m
-sia con gen_resolution_global 129 sia con 519; crop di 25 m: ~0.3 m). Ricostruire quadrati
-piccoli assottiglia quindi il guscio; lo strato medio (come in strato_singolo_ppsurf.py) toglie
-il resto.
+Output: benchmark/benchmark_output/tile_ppsurf.csv (appended) and benchmark/benchmark_output/ppsurf_tile/
 
-Quadrati: nuclei di lato (lato - 2*margine) che coprono l'impronta della scansione senza
-sovrapporsi; PPSurf riceve i punti del nucleo allargato di margine per lato, cosi' i bordi di
-ogni ricostruzione (artefatti) cadono fuori dal nucleo e vengono scartati nell'unione.
-Tutti i quadrati di un terreno passano in UN solo sottoprocesso PPSurf (modalita' dataset di
-pps.py: testset.txt + 04_pts_vis/), quindi modello e CUDA vengono caricati una volta sola.
-Il tempo di PPSurf e' fissato dalla griglia, non dai punti: ogni quadrato costa quanto un
-terreno intero alla stessa gen_resolution_global.
-
-Unione e varianti misurate contro il fondale della GT (stessa funzione di evaluate.py):
-  tile_originale      mesh di ogni quadrato ritagliata sul proprio nucleo, concatenate
-  tile_medio          strato medio su una griglia XZ globale (passo --passo): ogni nodo prende
-                      il valore dal quadrato del cui nucleo fa parte -> una sola heightmap
-  completo_originale  mesh PPSurf intera di evaluate.py (se presente; attenzione: e' quella
-  completo_medio      dell'ultima run di evaluate.py, con la sua gen_resolution_global)
-  poisson             mesh Poisson di evaluate.py (se presente)
-
-Lo strato medio e' 2.5D: va bene per il fondale, ma cancella sporgenze e vuoti (tubi, piloni).
-
-Output:
-  benchmark/benchmark_output/tile_ppsurf.csv                         in append, una riga per (run, terreno, variante)
-  benchmark/benchmark_output/ppsurf_tile/<id>_tile<lato>_{originale,medio}.ply
-
-Uso (dalla root del progetto, ambiente "ricostruzione3d"; parametri PPSurf dalla sezione ppsurf del config):
-	python benchmark/tile_ppsurf.py                              # split da config, 1 terreno per famiglia, quadrati da 25 m
-	python benchmark/tile_ppsurf.py --id rocky_007 --lato 25 --margine 2.5
+Usage (from the repository root, "ricostruzione3d" environment; PPSurf parameters from the config):
+	python benchmark/tile_ppsurf.py                              # split from config, 1 terrain per family, 25 m squares
+	python benchmark/tile_ppsurf.py --id rocky_007 --side 25 --margin 2.5
 """
 
 import argparse
@@ -49,203 +27,200 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmark.strato_singolo_ppsurf import primo_hit_verticale, mesh_da_heightmap, misura
-from evaluate import elenca_terreni, famiglia_di, famiglie_da_manifest, ultima_run
-from scripts.ppsurf import trova_python_ambiente_conda
+from benchmark.single_layer_ppsurf import first_vertical_hit, mesh_from_heightmap, measure
+from evaluate import list_terrains, family_of, families_from_manifest, latest_run
+from scripts.ppsurf import find_conda_env_python
 from utils.mesh import top_surface
-from utils.pipeline import load_config, config_per_terreno, carica_e_pulisci_point_cloud
+from utils.pipeline import load_config, config_for_terrain, load_and_clean_point_cloud
 
-FILE_OUTPUT = "benchmark/benchmark_output/tile_ppsurf.csv"
-CARTELLA_MESH = "benchmark/benchmark_output/ppsurf_tile"
+OUTPUT_FILE = "benchmark/benchmark_output/tile_ppsurf.csv"
+MESH_FOLDER = "benchmark/benchmark_output/ppsurf_tile"
 WORK_DIR = "benchmark/benchmark_output/ppsurf_tile_tmp"
 
 
 def box_xz(x0: float, x1: float, z0: float, z1: float) -> o3d.geometry.AxisAlignedBoundingBox:
-	"""Box XZ illimitato (in pratica) in Y."""
+	"""XZ box, (practically) unbounded in Y."""
 	return o3d.geometry.AxisAlignedBoundingBox(np.array([x0, -1e4, z0]), np.array([x1, 1e4, z1]))
 
 
-def strati(mesh: o3d.geometry.TriangleMesh, X: np.ndarray, Z: np.ndarray):
-	"""Quota del primo hit dall'alto e dal basso nei nodi (X, Z); NaN dove il raggio non colpisce."""
+def layers(mesh: o3d.geometry.TriangleMesh, X: np.ndarray, Z: np.ndarray):
+	"""Y of the first hit from above and from below at the (X, Z) nodes; NaN where the ray misses."""
 	y = np.asarray(mesh.vertices)[:, 1]
-	alto = primo_hit_verticale(mesh, X, Z, y.max() + 10, -1.0)
-	basso = primo_hit_verticale(mesh, X, Z, y.min() - 10, 1.0)
-	alto[~np.isfinite(alto)] = np.nan
-	basso[~np.isfinite(basso)] = np.nan
-	return alto, basso
+	top = first_vertical_hit(mesh, X, Z, y.max() + 10, -1.0)
+	bottom = first_vertical_hit(mesh, X, Z, y.min() - 10, 1.0)
+	top[~np.isfinite(top)] = np.nan
+	bottom[~np.isfinite(bottom)] = np.nan
+	return top, bottom
 
 
-def ricostruisci_quadrati(nuvole: dict, nome_run: str, ppsurf_dir: str, pps: dict):
-	"""Tutte le nuvole {nome: pcd} in un solo sottoprocesso PPSurf (modalita' dataset di pps.py).
-	Ritorna ({nome: mesh}, tempo_secondi); i quadrati senza mesh in uscita mancano dal dizionario."""
-	python_ppsurf = trova_python_ambiente_conda(pps["conda_env"], ppsurf_dir)
-	cartella = os.path.abspath(os.path.join(WORK_DIR, nome_run))
-	shutil.rmtree(cartella, ignore_errors=True)
-	cartella_dataset = os.path.join(cartella, "dataset")
-	cartella_punti = os.path.join(cartella_dataset, "04_pts_vis")  # struttura attesa da pps.py
-	cartella_output = os.path.join(cartella, "results")
-	os.makedirs(cartella_punti)
+def reconstruct_squares(clouds: dict, run_name: str, ppsurf_dir: str, pps: dict):
+	"""All clouds {name: pcd} in a single PPSurf subprocess (dataset mode of pps.py).
+	Returns ({name: mesh}, seconds); squares without an output mesh are missing from the dict."""
+	python_ppsurf = find_conda_env_python(pps["conda_env"], ppsurf_dir)
+	folder = os.path.abspath(os.path.join(WORK_DIR, run_name))
+	shutil.rmtree(folder, ignore_errors=True)
+	dataset_folder = os.path.join(folder, "dataset")
+	points_folder = os.path.join(dataset_folder, "04_pts_vis")  # layout expected by pps.py
+	output_folder = os.path.join(folder, "results")
+	os.makedirs(points_folder)
 
-	# in modalita' dataset pps.py assume input gia' normalizzati e non riporta le mesh in metri:
-	# stessa normalizzazione che applica al file singolo (source/base/math.py,
-	# get_points_normalization_info con padding_factor 0.05 di configs/poco.yaml), invertita all'uscita
-	normalizzazione = {}
-	for nome, pcd in nuvole.items():
+	# in dataset mode pps.py expects normalised input and does not map the meshes back to metres: apply the
+	# same normalisation it uses for a single file (padding_factor 0.05) and invert it on output
+	normalisation = {}
+	for name, pcd in clouds.items():
 		p = np.asarray(pcd.points)
-		centro = (p.min(axis=0) + p.max(axis=0)) / 2
-		scala = float((p.max(axis=0) - p.min(axis=0)).max() * 1.05)
-		normalizzazione[nome] = (centro, scala)
-		solo_punti = o3d.geometry.PointCloud(o3d.utility.Vector3dVector((p - centro) / scala))  # niente normali
-		o3d.io.write_point_cloud(os.path.join(cartella_punti, f"{nome}.xyz.ply"), solo_punti)
-	testset = os.path.join(cartella_dataset, "testset.txt")
+		center = (p.min(axis=0) + p.max(axis=0)) / 2
+		scale = float((p.max(axis=0) - p.min(axis=0)).max() * 1.05)
+		normalisation[name] = (center, scale)
+		points_only = o3d.geometry.PointCloud(o3d.utility.Vector3dVector((p - center) / scale))
+		o3d.io.write_point_cloud(os.path.join(points_folder, f"{name}.xyz.ply"), points_only)
+	testset = os.path.join(dataset_folder, "testset.txt")
 	with open(testset, "w") as f:
-		f.write("\n".join(nuvole) + "\n")
+		f.write("\n".join(clouds) + "\n")
 
-	cmd = [python_ppsurf, "pps.py", "rec", testset, cartella_output,
+	cmd = [python_ppsurf, "pps.py", "rec", testset, output_folder,
 		   "--model.init_args.gen_resolution_global", str(pps["gen_resolution_global"]),
 		   "--model.init_args.rec_batch_size", str(pps["rec_batch_size"])]
 	env = os.environ.copy()
-	env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # vedi scripts/ppsurf.py
+	env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # see scripts/ppsurf.py
 
-	print(f"\n[PPSurf] {len(nuvole)} quadrati in un solo sottoprocesso (ambiente '{pps['conda_env']}')...")
-	inizio = time.time()
-	risultato = subprocess.run(cmd, cwd=ppsurf_dir, env=env, capture_output=True, text=True)
-	tempo = time.time() - inizio
-	if risultato.returncode != 0:
-		print("--- ultime righe di stdout ---\n" + risultato.stdout[-3000:])
-		print("--- ultime righe di stderr ---\n" + risultato.stderr[-3000:])
-		raise RuntimeError(f"PPSurf (sottoprocesso) terminato con codice {risultato.returncode}")
-	print(f"[PPSurf] completato in {tempo:.1f}s ({tempo / len(nuvole):.1f}s per quadrato)")
+	print(f"\n[PPSurf] {len(clouds)} squares in a single subprocess (environment '{pps['conda_env']}')...")
+	start = time.time()
+	result = subprocess.run(cmd, cwd=ppsurf_dir, env=env, capture_output=True, text=True)
+	elapsed = time.time() - start
+	if result.returncode != 0:
+		print("--- last lines of stdout ---\n" + result.stdout[-3000:])
+		print("--- last lines of stderr ---\n" + result.stderr[-3000:])
+		raise RuntimeError(f"PPSurf (subprocess) exited with code {result.returncode}")
+	print(f"[PPSurf] finished in {elapsed:.1f}s ({elapsed / len(clouds):.1f}s per square)")
 
-	# modalita' dataset: <out>/<nome modello>/<cartella del dataset>/meshes/<nome>.xyz.ply
-	mesh = {}
-	for nome in nuvole:
-		candidati = glob.glob(os.path.join(cartella_output, "*", "dataset", "meshes", f"{nome}.xyz.ply"))
-		if candidati:
-			m = o3d.io.read_triangle_mesh(candidati[0])
-			centro, scala = normalizzazione[nome]
-			m.vertices = o3d.utility.Vector3dVector(np.asarray(m.vertices) * scala + centro)
-			mesh[nome] = m
+	# dataset mode: <out>/<model name>/<dataset folder>/meshes/<name>.xyz.ply
+	meshes = {}
+	for name in clouds:
+		candidates = glob.glob(os.path.join(output_folder, "*", "dataset", "meshes", f"{name}.xyz.ply"))
+		if candidates:
+			m = o3d.io.read_triangle_mesh(candidates[0])
+			center, scale = normalisation[name]
+			m.vertices = o3d.utility.Vector3dVector(np.asarray(m.vertices) * scale + center)
+			meshes[name] = m
 		else:
-			print(f"  ATTENZIONE: nessuna mesh in uscita per {nome}")
-	return mesh, tempo
+			print(f"  WARNING: no output mesh for {name}")
+	return meshes, elapsed
 
 
 def main():
-	config_base = load_config()
-	ev = config_base["evaluation"]
-	pps = config_base["ppsurf"]
+	base_config = load_config()
+	ev = base_config["evaluation"]
+	pps = base_config["ppsurf"]
 
-	parser = argparse.ArgumentParser(description="PPSurf a porzioni (quadrati XZ) + strato medio.")
+	parser = argparse.ArgumentParser(description="Tiled PPSurf (XZ squares) + middle layer.")
 	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test", "test+val"])
 	parser.add_argument("--run_dir", default=None,
-						help="cartella di una run di evaluate.py senza SW (default: la piu' recente dello split)")
-	parser.add_argument("--limit", type=int, default=1, help="terreni per famiglia (0 = tutti)")
-	parser.add_argument("--id", nargs="+", default=None, help="terreni specifici (ignora --limit)")
-	parser.add_argument("--lato", type=float, default=25.0, help="lato del quadrato dato a PPSurf, m")
-	parser.add_argument("--margine", type=float, default=2.5, help="sovrapposizione per lato, scartata nell'unione, m")
-	parser.add_argument("--min-punti", type=int, default=200, help="quadrati con meno punti nel nucleo vengono saltati")
-	parser.add_argument("--passo", type=float, default=0.25, help="passo della griglia XZ dello strato medio, m")
+						help="folder of an evaluate.py run without SW (default: the most recent of the split)")
+	parser.add_argument("--limit", type=int, default=1, help="terrains per family (0 = all)")
+	parser.add_argument("--id", nargs="+", default=None, help="specific terrains (ignores --limit)")
+	parser.add_argument("--side", type=float, default=25.0, help="side of the square given to PPSurf, m")
+	parser.add_argument("--margin", type=float, default=2.5, help="overlap per side, discarded when merging, m")
+	parser.add_argument("--min-points", type=int, default=200, help="squares with fewer points in the core are skipped")
+	parser.add_argument("--step", type=float, default=0.25, help="XZ grid step of the middle layer, m")
 	parser.add_argument("--gen-res", type=int, default=pps["gen_resolution_global"],
-						help="gen_resolution_global per quadrato (default: config)")
+						help="gen_resolution_global per square (default: config)")
 	parser.add_argument("--tau", type=float, default=ev["tau"])
 	args = parser.parse_args()
 	pps = {**pps, "gen_resolution_global": args.gen_res}
 
-	nucleo = args.lato - 2 * args.margine
-	if nucleo <= 0:
-		raise SystemExit("--lato deve essere maggiore di 2 * --margine")
+	core = args.side - 2 * args.margin
+	if core <= 0:
+		raise SystemExit("--side must be greater than 2 * --margin")
 
-	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
-	terreni = args.id or elenca_terreni(ev["synthetic_dir"], args.split, famiglie, args.limit)
-	try:  # le mesh di evaluate.py sono facoltative qui: senza, si misurano solo le varianti a porzioni
-		cartella_mesh_eval = os.path.join(args.run_dir or ultima_run(ev["output_dir"], args.split, False), "meshes")
+	families = families_from_manifest(ev["synthetic_dir"])
+	terrains = args.id or list_terrains(ev["synthetic_dir"], args.split, families, args.limit)
+	try:  # the evaluate.py meshes are optional: without them only the tiled variants are measured
+		eval_mesh_folder = os.path.join(args.run_dir or latest_run(ev["output_dir"], args.split, False), "meshes")
 	except FileNotFoundError:
-		cartella_mesh_eval = ""
-	ppsurf_dir = os.path.join(config_base["paths"]["neural_methods"], "ppsurf")
-	os.makedirs(CARTELLA_MESH, exist_ok=True)
+		eval_mesh_folder = ""
+	ppsurf_dir = os.path.join(base_config["paths"]["neural_methods"], "ppsurf")
+	os.makedirs(MESH_FOLDER, exist_ok=True)
 	run = datetime.datetime.now().isoformat(timespec="seconds")
-	righe = []
+	rows = []
 
-	for i, id_terreno in enumerate(terreni, 1):
-		cartella = os.path.join(ev["synthetic_dir"], args.split, id_terreno)
-		nome_run = f"{id_terreno}_tile{args.lato:g}"
-		print(f"\n=== [{i}/{len(terreni)}] {id_terreno} ===")
+	for i, terrain_id in enumerate(terrains, 1):
+		folder = os.path.join(ev["synthetic_dir"], args.split, terrain_id)
+		run_name = f"{terrain_id}_tile{args.side:g}"
+		print(f"\n=== [{i}/{len(terrains)}] {terrain_id} ===")
 
-		# --- input: stesso preprocessing di evaluate.py, poi suddivisione in quadrati
-		config = config_per_terreno(config_base, os.path.join(cartella, f"{id_terreno}_scan.csv"), "ppsurf")
-		pcd = carica_e_pulisci_point_cloud(config)
-		punti = np.asarray(pcd.points)
-		lo, hi = punti.min(axis=0), punti.max(axis=0)
-		nx = max(1, int(np.ceil((hi[0] - lo[0]) / nucleo)))
-		nz = max(1, int(np.ceil((hi[2] - lo[2]) / nucleo)))
+		config = config_for_terrain(base_config, os.path.join(folder, f"{terrain_id}_scan.csv"), "ppsurf")
+		pcd = load_and_clean_point_cloud(config)
+		points = np.asarray(pcd.points)
+		lo, hi = points.min(axis=0), points.max(axis=0)
+		nx = max(1, int(np.ceil((hi[0] - lo[0]) / core)))
+		nz = max(1, int(np.ceil((hi[2] - lo[2]) / core)))
 
-		nuclei, nuvole = {}, {}
+		cores, clouds = {}, {}
 		for ix in range(nx):
 			for iz in range(nz):
-				x0, z0 = lo[0] + ix * nucleo, lo[2] + iz * nucleo
-				box_nucleo = box_xz(x0, x0 + nucleo, z0, z0 + nucleo)
-				if len(box_nucleo.get_point_indices_within_bounding_box(pcd.points)) < args.min_punti:
+				x0, z0 = lo[0] + ix * core, lo[2] + iz * core
+				core_box = box_xz(x0, x0 + core, z0, z0 + core)
+				if len(core_box.get_point_indices_within_bounding_box(pcd.points)) < args.min_points:
 					continue
-				nome = f"{id_terreno}_x{ix:02d}_z{iz:02d}"
-				nuclei[nome] = (ix, iz, box_nucleo)
-				nuvole[nome] = pcd.crop(box_xz(x0 - args.margine, x0 + nucleo + args.margine,
-											   z0 - args.margine, z0 + nucleo + args.margine))
-		print(f"[quadrati] {len(nuvole)} su {nx}x{nz} (lato {args.lato:g} m, nucleo {nucleo:g} m, "
-			  f"celle marching cubes ~{args.lato / (pps['gen_resolution_global'] - 1):.2f} m)")
+				name = f"{terrain_id}_x{ix:02d}_z{iz:02d}"
+				cores[name] = (ix, iz, core_box)
+				clouds[name] = pcd.crop(box_xz(x0 - args.margin, x0 + core + args.margin,
+											   z0 - args.margin, z0 + core + args.margin))
+		print(f"[squares] {len(clouds)} of {nx}x{nz} (side {args.side:g} m, core {core:g} m, "
+			  f"marching-cubes cells ~{args.side / (pps['gen_resolution_global'] - 1):.2f} m)")
 
-		mesh_quadrati, tempo = ricostruisci_quadrati(nuvole, nome_run, ppsurf_dir, pps)
+		square_meshes, elapsed = reconstruct_squares(clouds, run_name, ppsurf_dir, pps)
 
-		# --- unione: originale = mesh ritagliate sui nuclei; medio = una heightmap sulla griglia globale
-		X, Z = np.meshgrid(np.arange(lo[0], hi[0] + 1e-9, args.passo), np.arange(lo[2], hi[2] + 1e-9, args.passo))
-		ix_nodo = np.minimum(((X - lo[0]) // nucleo).astype(int), nx - 1)
-		iz_nodo = np.minimum(((Z - lo[2]) // nucleo).astype(int), nz - 1)
-		alto, basso = np.full(X.shape, np.nan), np.full(X.shape, np.nan)
-		tile_originale = o3d.geometry.TriangleMesh()
-		for nome, mesh in mesh_quadrati.items():
-			ix, iz, box_nucleo = nuclei[nome]
-			tile_originale += mesh.crop(box_nucleo)
-			sel = (ix_nodo == ix) & (iz_nodo == iz)
-			alto[sel], basso[sel] = strati(mesh, X[sel], Z[sel])
-		tile_originale.compute_vertex_normals()
-		tile_medio = mesh_da_heightmap(X, (alto + basso) / 2, Z)
-		o3d.io.write_triangle_mesh(os.path.join(CARTELLA_MESH, f"{nome_run}_originale.ply"), tile_originale)
-		o3d.io.write_triangle_mesh(os.path.join(CARTELLA_MESH, f"{nome_run}_medio.ply"), tile_medio)
-		spessore_tile = float(np.nanmedian(alto - basso))
+		# merge: original = meshes cropped to their cores; middle = one heightmap on the global grid
+		X, Z = np.meshgrid(np.arange(lo[0], hi[0] + 1e-9, args.step), np.arange(lo[2], hi[2] + 1e-9, args.step))
+		ix_node = np.minimum(((X - lo[0]) // core).astype(int), nx - 1)
+		iz_node = np.minimum(((Z - lo[2]) // core).astype(int), nz - 1)
+		top, bottom = np.full(X.shape, np.nan), np.full(X.shape, np.nan)
+		tile_original = o3d.geometry.TriangleMesh()
+		for name, mesh in square_meshes.items():
+			ix, iz, core_box = cores[name]
+			tile_original += mesh.crop(core_box)
+			sel = (ix_node == ix) & (iz_node == iz)
+			top[sel], bottom[sel] = layers(mesh, X[sel], Z[sel])
+		tile_original.compute_vertex_normals()
+		tile_middle = mesh_from_heightmap(X, (top + bottom) / 2, Z)
+		o3d.io.write_triangle_mesh(os.path.join(MESH_FOLDER, f"{run_name}_original.ply"), tile_original)
+		o3d.io.write_triangle_mesh(os.path.join(MESH_FOLDER, f"{run_name}_middle.ply"), tile_middle)
+		tile_thickness = float(np.nanmedian(top - bottom))
 
-		varianti = {"tile_originale": (tile_originale, spessore_tile), "tile_medio": (tile_medio, spessore_tile)}
-		percorso_completo = os.path.join(cartella_mesh_eval, f"{id_terreno}_ppsurf.ply")
-		if os.path.exists(percorso_completo):
-			completo = o3d.io.read_triangle_mesh(percorso_completo)
-			alto_c, basso_c = strati(completo, X, Z)
-			spessore_completo = float(np.nanmedian(alto_c - basso_c))
-			varianti["completo_originale"] = (completo, spessore_completo)
-			varianti["completo_medio"] = (mesh_da_heightmap(X, (alto_c + basso_c) / 2, Z), spessore_completo)
-		percorso_poisson = os.path.join(cartella_mesh_eval, f"{id_terreno}_poisson.ply")
-		if os.path.exists(percorso_poisson):
-			varianti["poisson"] = (o3d.io.read_triangle_mesh(percorso_poisson), float("nan"))
+		variants = {"tile_original": (tile_original, tile_thickness), "tile_middle": (tile_middle, tile_thickness)}
+		full_path = os.path.join(eval_mesh_folder, f"{terrain_id}_ppsurf.ply")
+		if os.path.exists(full_path):
+			full = o3d.io.read_triangle_mesh(full_path)
+			top_f, bottom_f = layers(full, X, Z)
+			full_thickness = float(np.nanmedian(top_f - bottom_f))
+			variants["full_original"] = (full, full_thickness)
+			variants["full_middle"] = (mesh_from_heightmap(X, (top_f + bottom_f) / 2, Z), full_thickness)
+		poisson_path = os.path.join(eval_mesh_folder, f"{terrain_id}_poisson.ply")
+		if os.path.exists(poisson_path):
+			variants["poisson"] = (o3d.io.read_triangle_mesh(poisson_path), float("nan"))
 
-		# --- metriche contro il fondale della GT
-		fondale = top_surface(o3d.io.read_triangle_mesh(os.path.join(cartella, f"{id_terreno}_ground_truth.obj")))
-		punti_fondale = np.asarray(fondale.sample_points_uniformly(ev["n_campioni"]).points)
-		for variante, (mesh, spessore) in varianti.items():
-			m = misura(mesh, fondale, punti_fondale, ev["n_campioni"], args.tau)
-			righe.append({"run": run, "id": id_terreno, "famiglia": famiglia_di(id_terreno, famiglie),
-						  "variante": variante, "lato": args.lato, "margine": args.margine,
-						  "gen_resolution_global": pps["gen_resolution_global"], "n_quadrati": len(mesh_quadrati),
-						  "tempo_ppsurf_secondi": tempo, "spessore_mediano": spessore, **m})
-			print(f"  {variante:19s} chamfer={m['chamfer']:.3f}  P={m['precisione']:.3f}  R={m['richiamo']:.3f}  "
-				  f"F={m['fscore']:.3f}  spessore guscio={spessore:.2f} m")
+		seabed = top_surface(o3d.io.read_triangle_mesh(os.path.join(folder, f"{terrain_id}_ground_truth.obj")))
+		seabed_points = np.asarray(seabed.sample_points_uniformly(ev["n_samples"]).points)
+		for variant, (mesh, thickness) in variants.items():
+			m = measure(mesh, seabed, seabed_points, ev["n_samples"], args.tau)
+			rows.append({"run": run, "id": terrain_id, "family": family_of(terrain_id, families),
+						 "variant": variant, "side": args.side, "margin": args.margin,
+						 "gen_resolution_global": pps["gen_resolution_global"], "n_squares": len(square_meshes),
+						 "ppsurf_time_s": elapsed, "median_thickness": thickness, **m})
+			print(f"  {variant:19s} chamfer={m['chamfer']:.3f}  P={m['precision']:.3f}  R={m['recall']:.3f}  "
+				  f"F={m['fscore']:.3f}  shell thickness={thickness:.2f} m")
 
-	df = pd.DataFrame(righe)
-	precedenti = pd.read_csv(FILE_OUTPUT) if os.path.exists(FILE_OUTPUT) else pd.DataFrame()
-	pd.concat([precedenti, df], ignore_index=True).to_csv(FILE_OUTPUT, index=False, float_format="%.3f")
-	print(f"\nRisultati in {FILE_OUTPUT} (run {run}), mesh in {CARTELLA_MESH}/")
+	df = pd.DataFrame(rows)
+	previous = pd.read_csv(OUTPUT_FILE) if os.path.exists(OUTPUT_FILE) else pd.DataFrame()
+	pd.concat([previous, df], ignore_index=True).to_csv(OUTPUT_FILE, index=False, float_format="%.3f")
+	print(f"\nResults in {OUTPUT_FILE} (run {run}), meshes in {MESH_FOLDER}/")
 
-	ordine = ["completo_originale", "completo_medio", "tile_originale", "tile_medio", "poisson"]
-	media = df.groupby("variante")[["chamfer", "precisione", "richiamo", "fscore", "spessore_mediano"]].mean()
-	print(f"\n=== Media su {df['id'].nunique()} terreni (tau={args.tau} m) ===")
-	print(media.reindex([v for v in ordine if v in media.index]).round(3).to_string())
+	order = ["full_original", "full_middle", "tile_original", "tile_middle", "poisson"]
+	mean = df.groupby("variant")[["chamfer", "precision", "recall", "fscore", "median_thickness"]].mean()
+	print(f"\n=== Mean over {df['id'].nunique()} terrains (tau={args.tau} m) ===")
+	print(mean.reindex([v for v in order if v in mean.index]).round(3).to_string())
 
 
 if __name__ == "__main__":

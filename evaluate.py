@@ -1,47 +1,17 @@
 """
-Valutazione dei metodi di ricostruzione sui terreni sintetici.
+Evaluates the reconstruction methods on the synthetic terrains: reconstructs each <id>_scan.csv with
+utils/pipeline.py and compares the mesh with the seabed of <id>_ground_truth.obj (Chamfer, precision,
+recall, F-score at tau, distance statistics; latency and RTF per window with the sliding window).
 
-Per ogni terreno in data/synthetic/<split>/<id>/ ricostruisce la mesh da
-<id>_scan.csv con la pipeline di utils/pipeline.py e la confronta con
-<id>_ground_truth.obj:
-  - chamfer     : (distanza media ricostruzione->fondale + fondale->ricostruzione) / 2, in metri
-  - precisione  : frazione di punti della ricostruzione entro --tau dal fondale
-  - richiamo    : frazione di punti del fondale entro --tau dalla ricostruzione
-  - fscore      : media armonica di precisione e richiamo
-  - rec2gt_*, gt2rec_* : mediana, iqr (p75 - p25) e p95 delle distanze ricostruzione->fondale e
-                  fondale->ricostruzione: la media (Chamfer) e' dominata dalle code, queste no
-Con la sliding window, per ogni finestra: latenza, tempo di acquisizione e real-time factor
-(rtf = latenza / tempo tra due finestre consecutive; < 1 = tiene il passo col sonar).
-La GT e' chiusa (pareti e fondo): tutte le metriche usano solo il fondale (top_surface),
-altrimenti pareti e fondo, mai visti dal sonar, peserebbero come mancanti.
+Each run writes a new folder <evaluation.output_dir>/<date_time>_<split>[_sw]/ with config.txt, log.txt,
+git_diff.patch, metrics_per_terrain.csv, metrics_per_family.csv, windows.csv (SW only), meshes/ and
+distances/ (raw distances, from which --recompute derives the metrics at other thresholds).
 
-Percorsi e default (split, limit, metodi, n_campioni, tau) nella sezione "evaluation"
-di config/config.yaml; split, limit, metodi, tau e sliding window sovrascrivibili da riga di comando.
-
-Ogni esecuzione scrive in una cartella nuova, <evaluation.output_dir>/<data_ora>_<split>[_sw]/:
-  config.txt                 comando, config effettivamente usata (con le opzioni da riga di comando),
-                             macchina (CPU, GPU, versioni) e commit git
-  git_diff.patch             solo se c'erano modifiche non committate: il loro diff
-  log.txt                    tutto l'output del terminale, anche dei sottoprocessi
-  metriche_per_terreno.csv   una riga per (terreno, metodo)
-  metriche_per_famiglia.csv  medie per (famiglia, metodo)
-  finestre.csv               solo sliding window: una riga per (terreno, metodo, finestra) con
-                             ping, punti, latenza_s, tempo_metodo_s, acquisizione_s, budget_s, rtf
-  meshes/<id>_<metodo>[_sw].ply
-  distanze/<id>_<metodo>[_sw]_{rec2gt,gt2rec}.npy  distanze grezze (float32, n_campioni ciascuno):
-    rec2gt = punti della ricostruzione -> fondale, gt2rec = punti del fondale -> ricostruzione;
-    precisione/richiamo/F-score/Chamfer per qualsiasi tau si ricalcolano da qui.
-Con sliding_window.abilitato in config (o --sliding_window on) la ricostruzione avviene a finestre di ping (suffisso _sw).
-
-Uso:
-	python evaluate.py --split val --limit 2 --methods poisson ppsurf   # 2 terreni per famiglia
-	python evaluate.py --split test+val --methods poisson ppsurf --sliding_window on
-	python evaluate.py --ricalcola output/evaluation/<run> --tau 0.5 0.2 0.1   # altre soglie, senza ricostruire
-	python evaluate.py --methods ppsurf --set ppsurf.gen_refine_iter=5          # un parametro diverso dal config
-
-Con --ricalcola non si ricostruisce nulla: dalle distanze grezze di una run gia' fatta si ricalcolano
-Chamfer, precisione, richiamo e F-score per ogni tau indicato, e si scrivono nella cartella della run
-metriche_tau.csv (una riga per terreno, metodo e tau) e metriche_tau_per_famiglia.csv (medie).
+Usage:
+	python evaluate.py --split val --limit 2 --methods poisson ppsurf      # 2 terrains per family
+	python evaluate.py --split test+val --sliding_window on
+	python evaluate.py --recompute output/evaluation/<run> --tau 0.1 0.2 0.5
+	python evaluate.py --methods ppsurf --set ppsurf.gen_refine_iter=5
 """
 
 import argparse
@@ -59,85 +29,84 @@ import pandas as pd
 import yaml
 
 from utils.mesh import top_surface
-from utils.run_info import ambiente, stato_git, TeeLog, MonitorRisorse
-from utils.pipeline import load_config, config_per_terreno, ricostruisci, ESECUTORI
+from utils.run_info import environment, git_state, TeeLog, ResourceMonitor
+from utils.pipeline import load_config, config_for_terrain, reconstruct, RUNNERS
 
 
-def distanze_da_mesh(punti: np.ndarray, mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
-	"""Distanza esatta punto-superficie (non punto-punto) tramite RaycastingScene."""
-	scena = o3d.t.geometry.RaycastingScene()
-	scena.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
-	return scena.compute_distance(o3d.core.Tensor(punti.astype(np.float32))).numpy()
+def distances_to_mesh(points: np.ndarray, mesh: o3d.geometry.TriangleMesh) -> np.ndarray:
+	"""Exact point-to-surface distance (not point-to-point) via RaycastingScene."""
+	scene = o3d.t.geometry.RaycastingScene()
+	scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+	return scene.compute_distance(o3d.core.Tensor(points.astype(np.float32))).numpy()
 
 
-def metriche_superficie(d_rec: np.ndarray, d_fondale: np.ndarray, tau: float) -> dict:
-	"""Chamfer e F-score contro il fondale.
-	d_rec: distanze dei punti della ricostruzione dal fondale; d_fondale: dei punti del fondale dalla ricostruzione."""
-	precisione = float((d_rec <= tau).mean())
-	richiamo = float((d_fondale <= tau).mean())
+def surface_metrics(d_rec: np.ndarray, d_seabed: np.ndarray, tau: float) -> dict:
+	"""Chamfer and F-score against the seabed. d_rec: distances of the reconstruction points from the seabed;
+	d_seabed: distances of the seabed points from the reconstruction."""
+	precision = float((d_rec <= tau).mean())
+	recall = float((d_seabed <= tau).mean())
 	return {
-		"chamfer": float((d_rec.mean() + d_fondale.mean()) / 2),
-		"precisione": precisione,
-		"richiamo": richiamo,
-		"fscore": 2 * precisione * richiamo / (precisione + richiamo) if precisione + richiamo > 0 else 0.0,
+		"chamfer": float((d_rec.mean() + d_seabed.mean()) / 2),
+		"precision": precision,
+		"recall": recall,
+		"fscore": 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0,
 	}
 
 
-def statistiche_distanze(d: np.ndarray, prefisso: str) -> dict:
-	"""Mediana, scarto interquartile e 95-esimo percentile di un vettore di distanze."""
+def distance_stats(d: np.ndarray, prefix: str) -> dict:
+	"""Median, interquartile range and 95th percentile of a distance vector."""
 	p25, p50, p75, p95 = np.percentile(d, [25, 50, 75, 95])
-	return {f"{prefisso}_mediana": float(p50), f"{prefisso}_iqr": float(p75 - p25), f"{prefisso}_p95": float(p95)}
+	return {f"{prefix}_median": float(p50), f"{prefix}_iqr": float(p75 - p25), f"{prefix}_p95": float(p95)}
 
 
-def riassunto_finestre(finestre: list) -> dict:
-	"""Colonne per terreno dalle statistiche delle finestre (sliding window)."""
-	ok = [f for f in finestre if f["esito"] == "ok"]
+def window_summary(windows: list) -> dict:
+	"""Per-terrain columns from the window statistics (sliding window)."""
+	ok = [w for w in windows if w["status"] == "ok"]
 	if not ok:
 		return {}
-	latenze = np.array([f["latenza_s"] for f in ok])
-	rtf = np.array([f["rtf"] for f in ok if f["rtf"] is not None])
-	riassunto = {"n_finestre": len(ok), "latenza_mediana_s": float(np.median(latenze)),
-				 "latenza_max_s": float(latenze.max())}
+	latencies = np.array([w["latency_s"] for w in ok])
+	rtf = np.array([w["rtf"] for w in ok if w["rtf"] is not None])
+	summary = {"n_windows": len(ok), "median_latency_s": float(np.median(latencies)),
+			   "max_latency_s": float(latencies.max())}
 	if len(rtf):
-		riassunto.update(rtf_mediano=float(np.median(rtf)), rtf_max=float(rtf.max()),
-						 finestre_in_tempo=float((rtf <= 1).mean()))
-	return riassunto
+		summary.update(median_rtf=float(np.median(rtf)), max_rtf=float(rtf.max()),
+					   windows_in_time=float((rtf <= 1).mean()))
+	return summary
 
 
-def calcola_metriche(mesh: o3d.geometry.TriangleMesh, fondale: o3d.geometry.TriangleMesh,
-					 tau: float, n_campioni: int):
-	"""Metriche aggregate + distanze grezze {"rec2gt": ricostruzione->fondale, "gt2rec": fondale->ricostruzione}."""
-	punti_mesh = np.asarray(mesh.sample_points_uniformly(n_campioni).points)
-	punti_fondale = np.asarray(fondale.sample_points_uniformly(n_campioni).points)
+def compute_metrics(mesh: o3d.geometry.TriangleMesh, seabed: o3d.geometry.TriangleMesh, tau: float, n_samples: int):
+	"""Aggregate metrics + raw distances {"rec2gt": reconstruction->seabed, "gt2rec": seabed->reconstruction}."""
+	mesh_points = np.asarray(mesh.sample_points_uniformly(n_samples).points)
+	seabed_points = np.asarray(seabed.sample_points_uniformly(n_samples).points)
 
-	rec2gt = distanze_da_mesh(punti_mesh, fondale)
-	gt2rec = distanze_da_mesh(punti_fondale, mesh)
-	metriche = {
-		**metriche_superficie(rec2gt, gt2rec, tau),
-		**statistiche_distanze(rec2gt, "rec2gt"),
-		**statistiche_distanze(gt2rec, "gt2rec"),
+	rec2gt = distances_to_mesh(mesh_points, seabed)
+	gt2rec = distances_to_mesh(seabed_points, mesh)
+	metrics = {
+		**surface_metrics(rec2gt, gt2rec, tau),
+		**distance_stats(rec2gt, "rec2gt"),
+		**distance_stats(gt2rec, "gt2rec"),
 	}
-	return metriche, {"rec2gt": rec2gt, "gt2rec": gt2rec}
+	return metrics, {"rec2gt": rec2gt, "gt2rec": gt2rec}
 
 
-def elenca_terreni(synthetic_dir: str, split: str, famiglie: dict, limit: int = None) -> list:
-	"""Terreni dello split in ordine alfabetico; con limit, i primi limit di OGNI famiglia."""
-	cartella = os.path.join(synthetic_dir, split)
-	ids = sorted(d for d in os.listdir(cartella) if os.path.isdir(os.path.join(cartella, d)))
+def list_terrains(synthetic_dir: str, split: str, families: dict, limit: int = None) -> list:
+	"""Terrains of the split in alphabetical order; with limit, the first limit of EACH family."""
+	folder = os.path.join(synthetic_dir, split)
+	ids = sorted(d for d in os.listdir(folder) if os.path.isdir(os.path.join(folder, d)))
 	if not limit:
 		return ids
-	per_famiglia = {}
-	for id_terreno in ids:
-		per_famiglia.setdefault(famiglia_di(id_terreno, famiglie), []).append(id_terreno)
-	return [i for gruppo in per_famiglia.values() for i in gruppo[:limit]]
+	per_family = {}
+	for terrain_id in ids:
+		per_family.setdefault(family_of(terrain_id, families), []).append(terrain_id)
+	return [i for group in per_family.values() for i in group[:limit]]
 
 
-def famiglia_di(id_terreno: str, famiglie: dict) -> str:
-	"""Famiglia dal manifest, altrimenti dal prefisso dell'id (flat_sand_012 -> flat_sand)."""
-	return famiglie.get(id_terreno, id_terreno.rsplit("_", 1)[0])
+def family_of(terrain_id: str, families: dict) -> str:
+	"""Family from the manifest, otherwise from the id prefix (flat_sand_012 -> flat_sand)."""
+	return families.get(terrain_id, terrain_id.rsplit("_", 1)[0])
 
 
-def famiglie_da_manifest(synthetic_dir: str) -> dict:
+def families_from_manifest(synthetic_dir: str) -> dict:
 	manifest = os.path.join(synthetic_dir, "manifest.csv")
 	if not os.path.exists(manifest):
 		return {}
@@ -145,238 +114,233 @@ def famiglie_da_manifest(synthetic_dir: str) -> dict:
 	return dict(zip(df["id"], df["family"]))
 
 
-CSV_TERRENO = "metriche_per_terreno.csv"
-CSV_FAMIGLIA = "metriche_per_famiglia.csv"
-CSV_FINESTRE = "finestre.csv"
+CSV_TERRAIN = "metrics_per_terrain.csv"
+CSV_FAMILY = "metrics_per_family.csv"
+CSV_WINDOWS = "windows.csv"
+QUALITY_COLUMNS = ["chamfer", "precision", "recall", "fscore"]
 
 
-def cartella_run(output_dir: str, split: str, sliding_window: bool) -> str:
-	"""Cartella nuova per questa esecuzione: <output_dir>/<data_ora>_<split>[_sw]."""
-	ora = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-	return os.path.join(output_dir, f"{ora}_{split}{'_sw' if sliding_window else ''}")
+def run_folder(output_dir: str, split: str, sliding_window: bool) -> str:
+	"""New folder for this run: <output_dir>/<date_time>_<split>[_sw]."""
+	now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+	return os.path.join(output_dir, f"{now}_{split}{'_sw' if sliding_window else ''}")
 
 
-def ultima_run(output_dir: str, split: str, sliding_window: bool = None) -> str:
-	"""Cartella della run piu' recente di uno split (per gli script di benchmark che ne leggono le mesh).
-	sliding_window: True/False per filtrare le run con/senza SW, None = qualsiasi."""
-	suffissi = {None: ["", "_sw"], False: [""], True: ["_sw"]}[sliding_window]
-	cartelle = sorted(c for s in suffissi for c in glob.glob(os.path.join(output_dir, f"*_{split}{s}")))
-	if not cartelle:
-		raise FileNotFoundError(f"Nessuna run di evaluate.py per lo split {split} in {output_dir}")
-	return cartelle[-1]  # il nome comincia con data e ora: l'ordine alfabetico e' quello temporale
+def latest_run(output_dir: str, split: str, sliding_window: bool = None) -> str:
+	"""Most recent run folder of a split (for the benchmark scripts that read its meshes).
+	sliding_window: True/False to select runs with/without SW, None = any."""
+	suffixes = {None: ["", "_sw"], False: [""], True: ["_sw"]}[sliding_window]
+	folders = sorted(c for s in suffixes for c in glob.glob(os.path.join(output_dir, f"*_{split}{s}")))
+	if not folders:
+		raise FileNotFoundError(f"No evaluate.py run for split {split} in {output_dir}")
+	return folders[-1]  # names start with date and time: alphabetical order is chronological
 
 
-def salva_config(config: dict, cartella_out: str):
-	"""config.txt: comando, config effettiva della run (YAML), macchina e versione del codice.
-	Se ci sono modifiche non committate, il loro diff va in git_diff.patch."""
-	python_ppsurf = None
-	if "ppsurf" in config["evaluation"]["metodi"]:
+def save_config(config: dict, out_folder: str):
+	"""config.txt: command, effective config (YAML), machine and code version; git_diff.patch if uncommitted."""
+	ppsurf_python = None
+	if "ppsurf" in config["evaluation"]["methods"]:
 		try:
-			from scripts.ppsurf import trova_python_ambiente_conda
-			python_ppsurf = trova_python_ambiente_conda(config["ppsurf"]["conda_env"], "")
+			from scripts.ppsurf import find_conda_env_python
+			ppsurf_python = find_conda_env_python(config["ppsurf"]["conda_env"], "")
 		except Exception:
 			pass
-	git, diff = stato_git()
-	with open(os.path.join(cartella_out, "config.txt"), "w") as f:
-		f.write(f"# comando: python {' '.join(sys.argv)}\n")
-		f.write(f"# avvio:   {datetime.datetime.now().isoformat(timespec='seconds')}\n")
-		f.write("# config effettiva (config/config.yaml + opzioni da riga di comando):\n\n")
+	git, diff = git_state()
+	with open(os.path.join(out_folder, "config.txt"), "w") as f:
+		f.write(f"# command: python {' '.join(sys.argv)}\n")
+		f.write(f"# started: {datetime.datetime.now().isoformat(timespec='seconds')}\n")
+		f.write("# effective config (config/config.yaml + command-line options):\n\n")
 		yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
-		f.write("\n# ---- macchina e versioni ----\n")
-		yaml.safe_dump({"ambiente": ambiente(python_ppsurf)}, f, sort_keys=False, allow_unicode=True)
-		f.write("\n# ---- codice ----\n")
+		f.write("\n# ---- machine and versions ----\n")
+		yaml.safe_dump({"environment": environment(ppsurf_python)}, f, sort_keys=False, allow_unicode=True)
+		f.write("\n# ---- code ----\n")
 		yaml.safe_dump({"git": git}, f, sort_keys=False, allow_unicode=True)
 	if diff:
-		with open(os.path.join(cartella_out, "git_diff.patch"), "w") as f:
+		with open(os.path.join(out_folder, "git_diff.patch"), "w") as f:
 			f.write(diff + "\n")
 
 
-def salva_csv(righe: list, cartella_out: str):
-	"""CSV per terreno e medie per famiglia di questa run."""
-	df = pd.DataFrame(righe)
-	df.to_csv(os.path.join(cartella_out, CSV_TERRENO), index=False, float_format="%.3f")
+def save_csv(rows: list, out_folder: str):
+	"""Per-terrain CSV and per-family means of this run."""
+	df = pd.DataFrame(rows)
+	df.to_csv(os.path.join(out_folder, CSV_TERRAIN), index=False, float_format="%.3f")
 
-	ok = df[df["errore"].isna()] if "errore" in df else df
+	ok = df[df["error"].isna()] if "error" in df else df
 	if ok.empty:
 		return
-	colonne = ["chamfer", "precisione", "richiamo", "fscore",
-			   "rec2gt_mediana", "rec2gt_iqr", "rec2gt_p95", "gt2rec_mediana", "gt2rec_iqr", "gt2rec_p95",
-			   "n_punti_input", "n_vertici", "tempo_calcolo_secondi", "ram_picco_mb", "vram_picco_mb",
-			   "latenza_mediana_s", "latenza_max_s", "rtf_mediano", "rtf_max", "finestre_in_tempo"]
-	colonne = [c for c in colonne if c in ok.columns]  # le colonne della SW esistono solo con la SW
-	gruppi = ["famiglia", "metodo", "sliding_window"]
-	media_e_std(ok, gruppi, colonne).to_csv(
-		os.path.join(cartella_out, CSV_FAMIGLIA), index=False, float_format="%.3f")
+	columns = ["chamfer", "precision", "recall", "fscore",
+			   "rec2gt_median", "rec2gt_iqr", "rec2gt_p95", "gt2rec_median", "gt2rec_iqr", "gt2rec_p95",
+			   "n_input_points", "n_vertices", "compute_time_s", "peak_ram_mb", "peak_vram_mb",
+			   "median_latency_s", "max_latency_s", "median_rtf", "max_rtf", "windows_in_time"]
+	columns = [c for c in columns if c in ok.columns]  # the SW columns exist only with SW
+	groups = ["family", "method", "sliding_window"]
+	mean_and_std(ok, groups, columns).to_csv(os.path.join(out_folder, CSV_FAMILY), index=False, float_format="%.3f")
 
 
-COLONNE_STD = ["chamfer", "precisione", "richiamo", "fscore"]
-
-
-def media_e_std(df: pd.DataFrame, gruppi: list, colonne: list) -> pd.DataFrame:
-	"""Medie per gruppo, con <col>_std (deviazione standard tra terreni) subito dopo le metriche di qualita'.
-	La std e' vuota con un solo terreno nel gruppo."""
-	g = df.groupby(gruppi)
-	medie = g[colonne].mean()
-	std = g[[c for c in COLONNE_STD if c in colonne]].std()
-	ordine = []
-	for c in colonne:
-		ordine.append(c)
+def mean_and_std(df: pd.DataFrame, groups: list, columns: list) -> pd.DataFrame:
+	"""Per-group means, with <col>_std (standard deviation across terrains) right after the quality metrics.
+	The std is empty with a single terrain in the group."""
+	g = df.groupby(groups)
+	means = g[columns].mean()
+	std = g[[c for c in QUALITY_COLUMNS if c in columns]].std()
+	order = []
+	for c in columns:
+		order.append(c)
 		if c in std.columns:
-			medie[f"{c}_std"] = std[c]
-			ordine.append(f"{c}_std")
-	medie = medie[ordine]
-	medie.insert(0, "n_terreni", g.size())
-	return medie.reset_index()
+			means[f"{c}_std"] = std[c]
+			order.append(f"{c}_std")
+	means = means[order]
+	means.insert(0, "n_terrains", g.size())
+	return means.reset_index()
 
 
-def salva_finestre(finestre: list, cartella_out: str, id_terreno: str, metodo: str):
-	"""Righe per finestra in coda a finestre.csv (una scrittura per terreno: un crash non perde i precedenti)."""
-	df = pd.DataFrame(finestre)
-	df.insert(0, "id", id_terreno)
-	df.insert(1, "metodo", metodo)
-	percorso = os.path.join(cartella_out, CSV_FINESTRE)
-	df.to_csv(percorso, mode="a", header=not os.path.exists(percorso), index=False, float_format="%.3f")
+def save_windows(windows: list, out_folder: str, terrain_id: str, method: str):
+	"""Appends the per-window rows to windows.csv (one write per terrain: a crash keeps the previous ones)."""
+	df = pd.DataFrame(windows)
+	df.insert(0, "id", terrain_id)
+	df.insert(1, "method", method)
+	path = os.path.join(out_folder, CSV_WINDOWS)
+	df.to_csv(path, mode="a", header=not os.path.exists(path), index=False, float_format="%.3f")
 
 
-def ricalcola_tau(cartella_run: str, tau: list):
-	"""Metriche a soglie tau diverse dalle distanze grezze di una run (nessuna ricostruzione)."""
-	per_terreno = pd.read_csv(os.path.join(cartella_run, CSV_TERRENO))
-	if "errore" in per_terreno:
-		per_terreno = per_terreno[per_terreno["errore"].isna()]
-	righe = []
-	for _, r in per_terreno.iterrows():
-		suffisso = "_sw" if str(r["sliding_window"]).lower() == "true" else ""
-		base = os.path.join(cartella_run, "distanze", f"{r['id']}_{r['metodo']}{suffisso}")
+def recompute_tau(run: str, tau: list):
+	"""Metrics at other thresholds tau from the raw distances of a run (no reconstruction)."""
+	per_terrain = pd.read_csv(os.path.join(run, CSV_TERRAIN))
+	if "error" in per_terrain:
+		per_terrain = per_terrain[per_terrain["error"].isna()]
+	rows = []
+	for _, r in per_terrain.iterrows():
+		suffix = "_sw" if str(r["sliding_window"]).lower() == "true" else ""
+		base = os.path.join(run, "distances", f"{r['id']}_{r['method']}{suffix}")
 		if not os.path.exists(f"{base}_rec2gt.npy"):
-			print(f"  distanze mancanti per {r['id']} {r['metodo']}: saltato")
+			print(f"  missing distances for {r['id']} {r['method']}: skipped")
 			continue
 		d_rec, d_gt = np.load(f"{base}_rec2gt.npy"), np.load(f"{base}_gt2rec.npy")
 		for t in tau:
-			righe.append({"id": r["id"], "famiglia": r["famiglia"], "metodo": r["metodo"],
-						  "sliding_window": r["sliding_window"], "tau": t, **metriche_superficie(d_rec, d_gt, t)})
-	if not righe:
-		sys.exit(f"Nessuna distanza in {cartella_run}/distanze")
-	df = pd.DataFrame(righe)
-	df.to_csv(os.path.join(cartella_run, "metriche_tau.csv"), index=False, float_format="%.3f")
-	gruppi = ["famiglia", "metodo", "sliding_window", "tau"]
-	media_e_std(df, gruppi, COLONNE_STD).to_csv(
-		os.path.join(cartella_run, "metriche_tau_per_famiglia.csv"), index=False, float_format="%.3f")
-	tutti = df.groupby(["metodo", "sliding_window", "tau"])[["chamfer", "precisione", "richiamo", "fscore"]].mean()
-	print(tutti.round(3).to_string())
-	print(f"\nScritti metriche_tau.csv e metriche_tau_per_famiglia.csv in {cartella_run}")
+			rows.append({"id": r["id"], "family": r["family"], "method": r["method"],
+						 "sliding_window": r["sliding_window"], "tau": t, **surface_metrics(d_rec, d_gt, t)})
+	if not rows:
+		sys.exit(f"No distances in {run}/distances")
+	df = pd.DataFrame(rows)
+	df.to_csv(os.path.join(run, "metrics_tau.csv"), index=False, float_format="%.3f")
+	groups = ["family", "method", "sliding_window", "tau"]
+	mean_and_std(df, groups, QUALITY_COLUMNS).to_csv(
+		os.path.join(run, "metrics_tau_per_family.csv"), index=False, float_format="%.3f")
+	overall = df.groupby(["method", "sliding_window", "tau"])[QUALITY_COLUMNS].mean()
+	print(overall.round(3).to_string())
+	print(f"\nWrote metrics_tau.csv and metrics_tau_per_family.csv in {run}")
+
+
+def apply_overrides(config: dict, assignments: list, parser: argparse.ArgumentParser):
+	"""--set SECTION.KEY=VALUE: values parsed as YAML (5 -> int, 0.5 -> float, null -> None, true -> bool)."""
+	for assignment in assignments:
+		key, sep, value = assignment.partition("=")
+		if not sep:
+			parser.error(f"--set expects SECTION.KEY=VALUE, not '{assignment}'")
+		*sections, last = key.split(".")
+		node = config
+		for section in sections:
+			if not isinstance(node.get(section), dict):
+				parser.error(f"--set: section '{section}' not in the config")
+			node = node[section]
+		if last not in node:
+			parser.error(f"--set: key '{key}' not in the config")
+		node[last] = yaml.safe_load(value)
 
 
 def main():
-	config_base = load_config()
-	ev = config_base["evaluation"]
+	base_config = load_config()
+	ev = base_config["evaluation"]
 
-	parser = argparse.ArgumentParser(description="Valuta i metodi di ricostruzione sui terreni sintetici.")
+	parser = argparse.ArgumentParser(description="Evaluates the reconstruction methods on the synthetic terrains.")
 	parser.add_argument("--split", default=ev["split"], choices=["train", "val", "test", "test+val"])
-	parser.add_argument("--limit", type=int, default=ev["limit"], help="numero massimo di terreni per famiglia")
-	parser.add_argument("--methods", nargs="+", default=ev["metodi"], choices=list(ESECUTORI))
+	parser.add_argument("--limit", type=int, default=ev["limit"], help="maximum number of terrains per family")
+	parser.add_argument("--methods", nargs="+", default=ev["methods"], choices=list(RUNNERS))
 	parser.add_argument("--tau", type=float, nargs="+", default=[ev["tau"]],
-						help="soglia in metri; con --ricalcola se ne possono dare piu' d'una")
-	parser.add_argument("--ricalcola", metavar="CARTELLA_RUN", default=None,
-						help="non ricostruisce: ricalcola le metriche per ogni --tau dalle distanze di questa run")
-	parser.add_argument("--set", nargs="+", action="extend", default=[], metavar="SEZIONE.CHIAVE=VALORE",
-						help="sovrascrive valori del config, es. --set ppsurf.gen_refine_iter=5 poisson.profondita=8")
+						help="threshold in metres; several values only with --recompute")
+	parser.add_argument("--recompute", metavar="RUN_FOLDER", default=None,
+						help="no reconstruction: recompute the metrics for each --tau from the distances of this run")
+	parser.add_argument("--set", nargs="+", action="extend", default=[], metavar="SECTION.KEY=VALUE",
+						help="overrides config values, e.g. --set ppsurf.gen_refine_iter=5 poisson.depth=8")
 	parser.add_argument("--sliding_window", choices=["on", "off"], default=None,
-						help="sovrascrive sliding_window.abilitato del config")
+						help="overrides sliding_window.enabled of the config")
 	args = parser.parse_args()
 
-	if args.ricalcola:
-		ricalcola_tau(args.ricalcola, args.tau)
+	if args.recompute:
+		recompute_tau(args.recompute, args.tau)
 		return
 	if len(args.tau) > 1:
-		parser.error("piu' valori di --tau solo con --ricalcola")
+		parser.error("several --tau values only with --recompute")
 	args.tau = args.tau[0]
 
-	# le opzioni da riga di comando entrano nella config, cosi' config.txt descrive la run davvero eseguita
-	config_base = copy.deepcopy(config_base)
-	for assegnazione in args.set:
-		chiave, sep, valore = assegnazione.partition("=")
-		if not sep:
-			parser.error(f"--set vuole SEZIONE.CHIAVE=VALORE, non '{assegnazione}'")
-		*sezioni, ultima = chiave.split(".")
-		nodo = config_base
-		for sezione in sezioni:
-			if not isinstance(nodo.get(sezione), dict):
-				parser.error(f"--set: sezione '{sezione}' non presente nel config")
-			nodo = nodo[sezione]
-		if ultima not in nodo:
-			parser.error(f"--set: chiave '{chiave}' non presente nel config")
-		nodo[ultima] = yaml.safe_load(valore)  # 5 -> int, 0.5 -> float, null -> None, true -> bool
+	# command-line options go into the config, so config.txt describes the run actually executed
+	base_config = copy.deepcopy(base_config)
+	apply_overrides(base_config, args.set, parser)
 	if args.sliding_window is not None:
-		config_base.setdefault("sliding_window", {})["abilitato"] = args.sliding_window == "on"
-	ev = config_base["evaluation"]
-	ev.update(split=args.split, limit=args.limit, metodi=args.methods, tau=args.tau)
-	sliding_window = bool(config_base.get("sliding_window", {}).get("abilitato"))
-	suffisso = "_sw" if sliding_window else ""
+		base_config.setdefault("sliding_window", {})["enabled"] = args.sliding_window == "on"
+	ev = base_config["evaluation"]
+	ev.update(split=args.split, limit=args.limit, methods=args.methods, tau=args.tau)
+	sliding_window = bool(base_config.get("sliding_window", {}).get("enabled"))
+	suffix = "_sw" if sliding_window else ""
 
-	cartella_out = cartella_run(ev["output_dir"], args.split, sliding_window)
-	cartella_mesh = os.path.join(cartella_out, "meshes")
-	cartella_distanze = os.path.join(cartella_out, "distanze")
-	os.makedirs(cartella_mesh, exist_ok=True)
-	os.makedirs(cartella_distanze, exist_ok=True)
-	# tutto l'output del terminale (anche dei sottoprocessi) finisce anche in log.txt
-	tee = TeeLog(os.path.join(cartella_out, "log.txt")).__enter__()
+	out_folder = run_folder(ev["output_dir"], args.split, sliding_window)
+	mesh_folder = os.path.join(out_folder, "meshes")
+	distance_folder = os.path.join(out_folder, "distances")
+	os.makedirs(mesh_folder, exist_ok=True)
+	os.makedirs(distance_folder, exist_ok=True)
+	tee = TeeLog(os.path.join(out_folder, "log.txt")).__enter__()
 	atexit.register(tee.__exit__, None, None, None)
-	print(f"Run in: {cartella_out}")
-	salva_config(config_base, cartella_out)
+	print(f"Run in: {out_folder}")
+	save_config(base_config, out_folder)
 
-	famiglie = famiglie_da_manifest(ev["synthetic_dir"])
-	terreni = elenca_terreni(ev["synthetic_dir"], args.split, famiglie, args.limit)
-	righe = []
+	families = families_from_manifest(ev["synthetic_dir"])
+	terrains = list_terrains(ev["synthetic_dir"], args.split, families, args.limit)
+	rows = []
 
-	# in sequenza: i metodi neurali condividono la work_dir
-	for i, id_terreno in enumerate(terreni, 1):
-		cartella = os.path.join(ev["synthetic_dir"], args.split, id_terreno)
-		percorso_scan = os.path.join(cartella, f"{id_terreno}_scan.csv")
-		percorso_gt = os.path.join(cartella, f"{id_terreno}_ground_truth.obj")
-		famiglia = famiglia_di(id_terreno, famiglie)
+	# sequential: the neural methods share the work_dir
+	for i, terrain_id in enumerate(terrains, 1):
+		folder = os.path.join(ev["synthetic_dir"], args.split, terrain_id)
+		scan_path = os.path.join(folder, f"{terrain_id}_scan.csv")
+		seabed = top_surface(o3d.io.read_triangle_mesh(os.path.join(folder, f"{terrain_id}_ground_truth.obj")))
+		family = family_of(terrain_id, families)
 
-		gt_mesh = o3d.io.read_triangle_mesh(percorso_gt)
-		fondale = top_surface(gt_mesh)
-
-		for metodo in args.methods:
-			print(f"\n=== [{i}/{len(terreni)}] {id_terreno} - {metodo} ===")
-			riga = {"id": id_terreno, "famiglia": famiglia, "metodo": metodo, "sliding_window": sliding_window}
+		for method in args.methods:
+			print(f"\n=== [{i}/{len(terrains)}] {terrain_id} - {method} ===")
+			row = {"id": terrain_id, "family": family, "method": method, "sliding_window": sliding_window}
 			try:
-				config = config_per_terreno(config_base, percorso_scan, metodo)
-				finestre = []
-				with MonitorRisorse() as risorse:
-					mesh, pcd, tempo, nome = ricostruisci(config, finestre)
-				riga["metodo"] = nome
-				# punti che il metodo ha ricevuto dopo il preprocessing (con la SW: somma sulle finestre,
-				# i ping in sovrapposizione contano due volte)
-				riga["n_punti_input"] = (sum(f.get("n_punti_puliti") or 0 for f in finestre) if finestre
+				config = config_for_terrain(base_config, scan_path, method)
+				windows = []
+				with ResourceMonitor() as resources:
+					mesh, pcd, elapsed, name = reconstruct(config, windows)
+				row["method"] = name
+				# points received by the method after preprocessing (with SW: sum over the windows,
+				# overlapping pings count twice)
+				row["n_input_points"] = (sum(w.get("n_clean_points") or 0 for w in windows) if windows
 										 else len(pcd.points))
-				riga["ram_picco_mb"] = risorse.ram_picco_mb
-				riga["vram_picco_mb"] = risorse.vram_picco_mb
+				row["peak_ram_mb"] = resources.peak_ram_mb
+				row["peak_vram_mb"] = resources.peak_vram_mb
 
-				mesh_out = os.path.join(cartella_mesh, f"{id_terreno}_{nome}{suffisso}.ply")
+				mesh_out = os.path.join(mesh_folder, f"{terrain_id}_{name}{suffix}.ply")
 				o3d.io.write_triangle_mesh(mesh_out, mesh)
 
-				metriche, distanze = calcola_metriche(mesh, fondale, args.tau, ev["n_campioni"])
-				riga.update(metriche)
-				# distanze grezze: altre soglie tau ricalcolabili offline senza rifare la ricostruzione
-				for verso, d in distanze.items():
-					np.save(os.path.join(cartella_distanze, f"{id_terreno}_{nome}{suffisso}_{verso}.npy"),
+				metrics, distances = compute_metrics(mesh, seabed, args.tau, ev["n_samples"])
+				row.update(metrics)
+				for direction, d in distances.items():
+					np.save(os.path.join(distance_folder, f"{terrain_id}_{name}{suffix}_{direction}.npy"),
 							d.astype(np.float32))
-				riga.update({"n_vertici": len(mesh.vertices), "tempo_calcolo_secondi": tempo,
-							 "mesh": mesh_out, "errore": None})
-				if finestre:
-					riga.update(riassunto_finestre(finestre))
-					salva_finestre(finestre, cartella_out, id_terreno, nome)
-				print("  " + ", ".join(f"{k}={v:.4f}" for k, v in riga.items() if isinstance(v, float)))
+				row.update({"n_vertices": len(mesh.vertices), "compute_time_s": elapsed,
+							"mesh": mesh_out, "error": None})
+				if windows:
+					row.update(window_summary(windows))
+					save_windows(windows, out_folder, terrain_id, name)
+				print("  " + ", ".join(f"{k}={v:.4f}" for k, v in row.items() if isinstance(v, float)))
 			except Exception as e:
 				traceback.print_exc()
-				riga["errore"] = f"{type(e).__name__}: {e}"
-			righe.append(riga)
-			# riscritto a ogni passo: un crash non perde i risultati
-			salva_csv(righe, cartella_out)
+				row["error"] = f"{type(e).__name__}: {e}"
+			rows.append(row)
+			save_csv(rows, out_folder)  # rewritten at every step: a crash does not lose results
 
-	print(f"\nRisultati in: {cartella_out}")
+	print(f"\nResults in: {out_folder}")
 
 
 if __name__ == "__main__":
