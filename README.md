@@ -204,6 +204,20 @@ top of the file):
 python visualization/visualize_mesh.py
 ```
 
+## Online reconstruction from Unity
+Start the simulation in Unity (add link to the repo unity used=), which writes the point cloud
+to a CSV (`x,y,z,intensity,ping_number,elapsed_s`, Y up) while it runs, then read that CSV as it grows:
+
+```bash
+python online_reconstruction.py --latest "/mnt/c/Users/<user>/.../Recordings" --view # newest CSV in the folder with a live 3D window
+python online_reconstruction.py --csv <scan.csv> --replay --speed 4             # replay a finished recording
+```
+
+Points are accumulated in a 0.5 m voxel map; every `online.update_every_pings` pings (default 5) the area
+covered by the new pings is rebuilt with the Poisson pipeline and replaces that part of the mesh. The run stops
+after `online.idle_timeout_s` without new data (or with Ctrl+C) and writes, in `output/online/<date_time>/`,
+`mesh.ply` (rewritten at each update), `updates.csv` (latency and RTF per update), `config.txt` and `log.txt`.
+
 ## Contacts
 
 Simone Dario ([simone.dario@univr.it](mailto:simone.dario@univr.it)), Università degli Studi di Verona

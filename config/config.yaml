@@ -56,3 +56,17 @@ evaluation:
   methods: ["poisson", "ppsurf"]     # run in sequence on each terrain
   n_samples: 100000                  # points sampled on each surface for the metrics
   tau: 0.5                           # precision/recall threshold in metres (equal to the preprocessing voxel)
+
+# Online reconstruction from Unity (online_reconstruction.py): the CSV is read while Unity writes it, the points
+# are accumulated in a voxel map (preprocessing.downsampling.voxel_size) and at each update the XZ box covered by
+# the new points is rebuilt with Poisson (same outlier removal, normals, Poisson and crop as above) and replaces
+# that part of the mesh.
+online:
+  update_every_pings: 5              # pings between two mesh updates (Unity: ~1 ping/s, ~22k points each)
+  margin: 2.5                        # map points around the updated box also given to Poisson, then cropped away, m
+  poisson_threads: 4                 # Poisson threads (-1 = all cores: with Unity running 25 s instead of 2 s per update,
+                                     # see benchmark/poisson_threads.py; same mesh with any value)
+  poll_s: 0.2                        # how often the growing CSV is checked, s
+  snapshot_every: 1                  # keep a copy of the mesh every N updates in meshes/ (0 = never), for the GIF
+  idle_timeout_s: 15                 # stop after this long without new data (Unity stopped), s
+  output_dir: "output/online"        # one folder per run (mesh.ply, updates.csv, config.txt, log.txt)

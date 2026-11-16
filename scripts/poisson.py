@@ -12,9 +12,10 @@ def reconstruct_poisson(pcd: o3d.geometry.PointCloud, depth: int = 9,
 	return trim_low_density(mesh, density, remove_low_density)
 
 
-def raw_poisson(pcd: o3d.geometry.PointCloud, depth: int = 9):
-	"""Poisson mesh before trimming, with the per-vertex density (low where the surface is invented)."""
-	mesh, density = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
+def raw_poisson(pcd: o3d.geometry.PointCloud, depth: int = 9, n_threads: int = -1):
+	"""Poisson mesh before trimming, with the per-vertex density (low where the surface is invented).
+	n_threads: -1 = all cores."""
+	mesh, density = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth, n_threads=n_threads)
 	return mesh, np.asarray(density)
 
 
