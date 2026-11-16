@@ -415,8 +415,8 @@ class Charts:
 				for tau, color, ls in zip(self.taus, SERIES, ["-", "--"]):
 					y = d[f"fscore_{tau:g}"]
 					self.lines += ax_f.plot(x, y, color=color, ls=ls, lw=2, marker="o", ms=4,
-											label=f"F @ {tau:g} m")
-					values.append((y.iloc[-1], f"F @ {tau:g} m  {y.iloc[-1]:.3f}"))
+											label=f"F, τ = {tau:g} m")
+					values.append((y.iloc[-1], f"F, τ = {tau:g} m  {y.iloc[-1]:.3f}"))
 				values.sort()
 				if len(values) == 2 and abs(values[1][0] - values[0][0]) < 0.06 * np.diff(ax_f.get_ylim())[0]:
 					values = [(values[0][0] - 0.03 * np.diff(ax_f.get_ylim())[0], values[0][1]),
@@ -506,12 +506,6 @@ def chrome(canvas: Image.Image, footer: str, t=None):
 	d.text((16, H - FOOT_H / 2), footer, fill=MUTED, font=font(13), anchor="lm")
 
 
-def metric_lines(row, taus):
-	lines = [f"P / R / F @ {tau:g} m:  {row[f'precision_{tau:g}']:.3f} / {row[f'recall_{tau:g}']:.3f} / "
-			 f"{row[f'fscore_{tau:g}']:.3f}" for tau in taus]
-	return lines + [f"Chamfer:  {row['chamfer']:.3f} m"]
-
-
 def title_card(footer, taus, every, rate, zexag, run):
 	img = Image.new("RGB", (W, H), BG)
 	d = ImageDraw.Draw(img)
@@ -525,7 +519,7 @@ def title_card(footer, taus, every, rate, zexag, run):
 		"White: newest ping, boat position, time cursor",
 		"Bottom: plan view (GT hillshade, area covered by the mesh, boat track, box rebuilt at the last update) "
 		"| metrics and latency per update",
-		f"Metrics vs GT: precision / recall / F-score at tau = {' and '.join(f'{t:g}' for t in taus)} m, "
+		f"Metrics vs GT: precision / recall / F-score at τ = {' and '.join(f'{t:g}' for t in taus)} m, "
 		"Chamfer distance [m]",
 		"Clock: simulation time; mesh delay = time the mesh is ready - time of its newest data"
 		+ (f" (simulation ran at {rate:.2f}x wall clock; latency in wall-clock s)" if abs(rate - 1) > 0.05 else ""),
@@ -549,7 +543,7 @@ def summary_card(last_frame: Image.Image, rows: pd.DataFrame, shown: pd.DataFram
 	d.text((cols[1], y), "mean ± std", fill=MUTED, font=font(15, True)); d.text((cols[2], y), "final", fill=MUTED,
 																				font=font(15, True))
 	final = shown.iloc[-1]
-	entries = [(f"{m.capitalize()} @ {tau:g} m", f"{m}_{tau:g}", 3) for tau in taus for m in ("precision", "recall",
+	entries = [(f"{m.capitalize()}, τ = {tau:g} m", f"{m}_{tau:g}", 3) for tau in taus for m in ("precision", "recall",
 																							  "fscore")]
 	entries.append(("Chamfer [m]", "chamfer", 3))
 	for label, col, dec in entries:
@@ -610,8 +604,7 @@ def main():
 	print(f"{len(pings)} pings, {len(shown)} updates with a snapshot, simulation/wall clock {rate:.2f}, "
 		  f"saved {os.path.join(a.run, 'metrics_per_update.csv')}")
 
-	footer = (f"Sensor: VLP-16 (proxy for multibeam sonar), sigma 0.05 m | voxel "
-			  f"{config['preprocessing']['downsampling']['voxel_size']:g} m, Poisson depth {config['poisson']['depth']}, "
+	footer = (f"Voxel {config['preprocessing']['downsampling']['voxel_size']:g} m, Poisson depth {config['poisson']['depth']}, "
 			  f"window {every * ping_dt:g} s ({every} pings) | GT: Madricardo et al. 2017, MGDS doi:10.1594/IEDA/323605, "
 			  f"{meta['cell_m']:g} m DTM")
 
@@ -662,8 +655,7 @@ def main():
 			info = ["waiting for the first update"]
 		panel_text(d, 2 * PANEL_W, TITLE_H, "Online reconstructed mesh (Poisson)", info)
 		if row is not None:
-			for n, line in enumerate(metric_lines(row, a.taus)):
-				d.text((2 * PANEL_W + 12, TITLE_H + TOP_H - 76 + 22 * n), line, fill=FG, font=font(14))
+			d.text((2 * PANEL_W + 12, TITLE_H + TOP_H - 32), f"Chamfer:  {row['chamfer']:.3f} m", fill=FG, font=font(14))
 		for x in (PANEL_W, 2 * PANEL_W):
 			d.text((x + PANEL_W - 12, TITLE_H + TOP_H - 12), f"vert. exag. {a.zexag:g}x", fill=MUTED, font=font(12),
 				   anchor="rb")

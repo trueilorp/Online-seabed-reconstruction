@@ -5,6 +5,7 @@ with the content and colours of video/render_video.py:
   online_timing.png    latency per update split by phase (updates.csv t_* columns) against the budget
   online_plan.png      plan view of the final mesh: GT hillshade, area seen by the sensor, area covered by the mesh,
                        seen but not covered (the missing recall), boat track (centre of each ping footprint)
+  online_mesh.png      screenshot of the final online mesh (camera of the video, colour of the offline screenshots)
 and, for the report, report/tables/online.tex (summary table) and report/tables/online_values.tex (the numbers
 quoted in the text, as LaTeX macros), so figures, table and text always come from the same run.
 Reads <run>/updates.csv, <run>/metrics_online.csv (evaluate_online.py --tau 0.2 0.5), the mesh snapshots, the
@@ -26,6 +27,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+plt.rcParams.update({"font.size": 9})  # figures are placed in pairs, at half the text width
 import numpy as np
 import open3d as o3d
 import pandas as pd
@@ -33,13 +36,57 @@ import yaml
 from matplotlib.colors import LightSource, ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evaluate_online import coverage_grid
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "video"))
-from render_video import ready_sim_times  # same mesh delay as the video
+from render_video import ready_sim_times, fit_camera, to_disp, VIEW_ANGLE  # same delay and camera as the video
+import pyvista as pv
+
+MESH_COLOR = (0.62, 0.70, 0.78)    # as visualization/screenshot_run.py
+
+
+def plot_mesh(run, zexag, out, size=(2400, 1350)):
+	"""Screenshot of the final online mesh: oblique view as the video, white background and colour as the
+	screenshots of the offline meshes, 50 m scale bar and north arrow."""
+	paths = sorted(glob.glob(os.path.join(run, "meshes", "mesh_*.ply"))) or [os.path.join(run, "mesh.ply")]
+	m = pv.read(paths[-1])
+	v = np.asarray(m.points)
+	m.points = to_disp(v[:, 0], v[:, 1], v[:, 2], zexag)
+	p = np.asarray(m.points)
+	lo, hi = p.min(axis=0), p.max(axis=0)
+	span = hi - lo
+	bar_len = next(L for L in (100, 50, 20, 10, 5) if L <= 0.45 * span[0])
+	y_bar, z0 = lo[1] - 0.04 * span[1], float(np.median(p[:, 2]))
+	bar = np.array([[lo[0], y_bar, z0], [lo[0] + bar_len, y_bar, z0]])
+	arrow_len = 0.1 * max(span[0], span[1])
+	arrow0 = np.array([hi[0] - 0.02 * span[0], y_bar, z0])
+
+	pl = pv.Plotter(off_screen=True, window_size=size)
+	pl.set_background("white")
+	pl.add_mesh(m, color=MESH_COLOR, smooth_shading=True, ambient=0.45, diffuse=0.7, specular=0.1)
+	tick = 0.015 * span[0]
+	for a, b in [(bar[0], bar[1]), (bar[0], bar[0] + [0, 0, tick]), (bar[1], bar[1] + [0, 0, tick])]:
+		pl.add_mesh(pv.Line(a, b), color=INK, line_width=4)
+	pl.add_mesh(pv.Arrow(start=arrow0, direction=(0, 1, 0), scale=arrow_len, tip_length=0.3, tip_radius=0.12,
+						 shaft_radius=0.035), color=INK)
+	sample = p[np.random.default_rng(0).choice(len(p), min(len(p), 20000), replace=False)]
+	cam, focal = fit_camera(np.vstack([sample, bar, arrow0 + [0, arrow_len, 0]]), size[0] / size[1])
+	pl.camera_position = [tuple(cam), tuple(focal), (0, 0, 1)]
+	pl.camera.view_angle = VIEW_ANGLE
+	pl.add_point_labels(np.array([bar.mean(axis=0) - [0, 0.03 * span[1], 0], arrow0 + [0, arrow_len * 1.15, 0]]),
+						[f"{bar_len} m", "N"], font_size=52, text_color=INK, shape=None, show_points=False,
+						always_visible=True)
+	img = Image.fromarray(pl.screenshot(return_img=True))
+	pl.close()
+	ink = np.argwhere(np.asarray(img.convert("L")) < 250)  # crop the white margins, keep 3% padding
+	(y0, x0), (y1, x1) = ink.min(axis=0), ink.max(axis=0)
+	pad = int(0.03 * max(img.size))
+	img.crop((max(0, x0 - pad), max(0, y0 - pad), min(img.width, x1 + pad), min(img.height, y1 + pad))).save(out)
+	print(f"  online_mesh: {paths[-1]}, {m.n_cells} triangles, vertical exaggeration {zexag:g}x")
 
 BLUE, PURPLE, TEAL = "#2a78d6", "#7b5cd6", "#1a9c86"     # F @ tau1, F @ tau2, Chamfer (as in the video)
 INK, INK_2, GRID = "#1f1f1e", "#5f5e58", "#e4e3de"
@@ -67,10 +114,10 @@ def full_batches(up: pd.DataFrame, every: int) -> pd.Series:
 
 
 def plot_quality(up, metrics, taus, out):
-	fig, (ax_f, ax_c) = plt.subplots(2, 1, figsize=(7.5, 4.6), sharex=True, height_ratios=[1.3, 1])
+	fig, (ax_f, ax_c) = plt.subplots(2, 1, figsize=(4.4, 3.6), sharex=True, height_ratios=[1.3, 1])
 	for tau, color, ls in zip(taus, [BLUE, PURPLE], ["-", "--"]):
 		m = metrics[np.isclose(metrics["tau"], tau)].set_index("update")["fscore"].reindex(up["update"])
-		ax_f.plot(up["elapsed_s"], m.values, color=color, ls=ls, lw=2, marker="o", ms=4, label=f"F-score @ {tau:g} m",
+		ax_f.plot(up["elapsed_s"], m.values, color=color, ls=ls, lw=2, marker="o", ms=4, label=f"F-score, τ = {tau:g} m",
 				  zorder=3)
 		ax_f.annotate(f"{m.values[-1]:.3f}", (up["elapsed_s"].iloc[-1], m.values[-1]), xytext=(6, 0),
 					  textcoords="offset points", va="center", color=INK, fontsize=9)
@@ -83,7 +130,7 @@ def plot_quality(up, metrics, taus, out):
 	ax_c.set_ylim(0, chamfer.max() * 1.25)
 	style(ax_f, "F-score")
 	style(ax_c, "Chamfer [m]", "simulation time of the newest data [s]")
-	ax_f.legend(ncols=2, frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.0))
+	ax_f.legend(ncols=2, frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.0), fontsize=8)
 	ax_c.set_xlim(0, up["elapsed_s"].max() * 1.08)
 	fig.tight_layout()
 	fig.savefig(out, dpi=200)
@@ -94,7 +141,7 @@ def plot_timing(up, every, out):
 	full = full_batches(up, every)
 	d = up[full].copy()
 	d["other"] = d["latency_s"] - d["t_poisson"] - d["t_crop"]  # read/parse are outside the latency
-	fig, ax = plt.subplots(figsize=(7.5, 3.4))
+	fig, ax = plt.subplots(figsize=(4.4, 3.4))
 	bottom = np.zeros(len(d))
 	for col, label, color in PHASES:
 		ax.bar(d["update"], d[col], 0.7, bottom=bottom, color=color, edgecolor="white", linewidth=0.6, label=label,
@@ -106,11 +153,11 @@ def plot_timing(up, every, out):
 				textcoords="offset points", va="bottom", color=INK_2, fontsize=9)
 	for u, lat, rtf in zip(d["update"], d["latency_s"], d["rtf"]):
 		ax.annotate(f"{rtf:.2f}", (u, lat), xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
-					color=INK_2, fontsize=7.5)
-	ax.set_ylim(0, max(budget, d["latency_s"].max()) * 1.25)
+					color=INK_2, fontsize=6.5, rotation=90)
+	ax.set_ylim(0, max(budget, d["latency_s"].max()) * 1.4)
 	ax.set_xticks(d["update"])
 	style(ax, "latency [s]", "update (label: RTF)")
-	ax.legend(ncols=3, frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.0), fontsize=8.5)
+	ax.legend(ncols=1, frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.0), fontsize=8)
 	fig.tight_layout()
 	fig.savefig(out, dpi=200)
 	plt.close(fig)
@@ -142,7 +189,7 @@ def plot_plan(run, scan, gt_dir, terrain_xz, radius, out):
 	track = np.c_[(g["x"].min() + g["x"].max()) / 2, (g["z"].min() + g["z"].max()) / 2]
 
 	shade = LightSource(azdeg=315, altdeg=45).hillshade(elevation, vert_exag=3, dx=cell, dy=cell)
-	fig, ax = plt.subplots(figsize=(7.5, 5.2))
+	fig, ax = plt.subplots(figsize=(4.4, 4.0))
 	ax.imshow(np.where(valid, shade, np.nan), origin="lower", extent=extent, cmap="gray", vmin=0, vmax=1.15,
 			  interpolation="bilinear")
 	ax.imshow(np.where(covered, 1.0, np.nan), origin="lower", extent=extent, cmap=ListedColormap([AREA]), alpha=0.45,
@@ -167,7 +214,7 @@ def plot_plan(run, scan, gt_dir, terrain_xz, radius, out):
 			   Patch(facecolor=HOLE, alpha=0.9, label=f"seen but not covered ({pct:.1f}% of the seen area)"),
 			   Line2D([], [], color=INK, lw=1.4, marker="o", markevery=[1], ms=5,
 					  label="boat track (footprint centre), end")]
-	ax.legend(handles=handles, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.13), ncols=2, fontsize=8.5,
+	ax.legend(handles=handles, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncols=1, fontsize=8,
 			  labelcolor=INK)
 	fig.savefig(out, dpi=200, bbox_inches="tight")
 	plt.close(fig)
@@ -195,7 +242,7 @@ def write_tex(up, metrics, taus, every, scan, plan, run, tables_dir):
 	for tau in taus:
 		for m, name in (("precision", "Precision"), ("recall", "Recall"), ("fscore", "F-score")):
 			c = col(m, tau)
-			rows.append(rf"{name} @ {tau:g}\,m & {c.mean():.3f} $\pm$ {c.std():.3f} & {c[last]:.3f} \\")
+			rows.append(rf"{name}, $\tau = {tau:g}$\,m &{c.mean():.3f} $\pm$ {c.std():.3f} & {c[last]:.3f} \\")
 	rows.append(rf"Chamfer [m] & {chamfer.mean():.3f} $\pm$ {chamfer.std():.3f} & {chamfer[last]:.3f} \\")
 	table = [r"\begin{tabular}{lcc}", r"\toprule", r"Metric & mean $\pm$ std over updates & final mesh \\",
 			 r"\midrule", *rows, r"\midrule", r" & median & max \\", r"\midrule",
@@ -239,6 +286,7 @@ def main():
 	parser.add_argument("--terrain-position", type=float, nargs=2, default=[-128.0, -128.0], metavar=("X", "Z"))
 	parser.add_argument("--coverage-radius", type=float, default=1.0, help="as evaluate_online.py")
 	parser.add_argument("--out-dir", default="imgs")
+	parser.add_argument("--zexag", type=float, default=2.0, help="vertical exaggeration of online_mesh.png")
 	parser.add_argument("--tables-dir", default="report/tables", help="where online.tex and online_values.tex go")
 	a = parser.parse_args()
 
@@ -260,6 +308,7 @@ def main():
 	scan = pd.read_csv(config["csv"], usecols=["x", "z", "ping_number", "elapsed_s"])
 	plan = plot_plan(a.run, scan, a.gt, a.terrain_position, a.coverage_radius,
 					 os.path.join(a.out_dir, "online_plan.png"))
+	plot_mesh(a.run, a.zexag, os.path.join(a.out_dir, "online_mesh.png"))
 	write_tex(up, metrics, a.taus, every, scan, plan, a.run, a.tables_dir)
 	print(f"Saved the figures in {a.out_dir}/")
 

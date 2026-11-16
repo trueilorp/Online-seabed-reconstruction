@@ -296,7 +296,8 @@ python visualization/plot_online.py output/online/<run>
 
 Writes to `imgs/` the figures of the report section on the online reconstruction (`online_quality.png`: F-score
 and Chamfer per update; `online_timing.png`: latency per update split by phase; `online_plan.png`: plan view of
-the area seen by the sensor, covered by the mesh and left uncovered), and to `report/tables/` the summary table
+the area seen by the sensor, covered by the mesh and left uncovered; `online_mesh.png`: screenshot of the final
+mesh, vertical exaggeration `--zexag`, default 2), and to `report/tables/` the summary table
 (`online.tex`) and the numbers quoted in the text (`online_values.tex`, LaTeX macros), so figures, table and text
 always come from the same run. Needs `metrics_online.csv` with τ = 0.2 and 0.5 m (section 4.3).
 
