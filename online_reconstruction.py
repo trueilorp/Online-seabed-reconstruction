@@ -10,7 +10,7 @@ meshes/mesh_<update>.ply (a copy every --save-every updates, for visualization/o
 
 Usage (from the repository root, "ricostruzione3d" environment):
 	python online_reconstruction.py --csv /mnt/c/.../Recordings/scan_20261114_102506.csv   # Unity is writing it
-	python online_reconstruction.py --latest /mnt/c/.../Recordings                       # newest scan_*.csv
+	python online_reconstruction.py --latest /mnt/c/.../Recordings                       # waits for the new scan_*.csv
 	python online_reconstruction.py --csv scan.csv --replay --speed 4                    # replay a recording
 	python online_reconstruction.py --latest /mnt/c/.../Recordings --view                # live 3D window
 """
@@ -193,11 +193,21 @@ def remove_in_box(mesh: o3d.geometry.TriangleMesh, lo: np.ndarray, hi: np.ndarra
 	return mesh
 
 
-def latest_csv(folder: str) -> str:
-	files = sorted(glob.glob(os.path.join(folder, "*.csv")), key=os.path.getmtime)
-	if not files:
-		raise SystemExit(f"No CSV in {folder}")
-	return files[-1]
+def wait_for_csv(folder: str = None, path: str = None, poll_s: float = 0.5) -> str:
+	"""Waits for the CSV to read: with folder, the newest *.csv modified after the launch (the recording Unity is
+	writing now, not an old one); with path, that file to exist. Ctrl+C stops waiting."""
+	start = time.time()
+	print(f"Waiting for {'a new CSV in ' + folder if folder else path} (put the scene in Play; Ctrl+C to stop)...",
+		  flush=True)
+	while True:
+		if path is not None:
+			if os.path.exists(path):
+				return path
+		else:
+			files = [f for f in glob.glob(os.path.join(folder, "*.csv")) if os.path.getmtime(f) >= start - 1.0]
+			if files:
+				return max(files, key=os.path.getmtime)
+		time.sleep(poll_s)
 
 
 class LiveView:
@@ -229,7 +239,7 @@ def main():
 	parser = argparse.ArgumentParser(description="Online Poisson reconstruction from the CSV written by Unity.")
 	source = parser.add_mutually_exclusive_group(required=True)
 	source.add_argument("--csv", help="CSV written by Unity")
-	source.add_argument("--latest", metavar="FOLDER", help="use the most recently modified CSV in FOLDER")
+	source.add_argument("--latest", metavar="FOLDER", help="wait for a new CSV in FOLDER (modified after the launch) and read it")
 	parser.add_argument("--replay", action="store_true", help="replay a finished CSV at its original pace")
 	parser.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
 	parser.add_argument("--every", type=int, default=config["online"]["update_every_pings"],
@@ -244,7 +254,15 @@ def main():
 	config["online"]["update_every_pings"] = args.every
 	config["online"]["snapshot_every"] = args.save_every
 	on = config["online"]
-	csv_path = args.csv or latest_csv(args.latest)
+	try:
+		if args.replay:
+			csv_path = args.csv or max(glob.glob(os.path.join(args.latest, "*.csv")), key=os.path.getmtime)
+		else:
+			csv_path = wait_for_csv(folder=args.latest, path=args.csv)
+	except KeyboardInterrupt:
+		raise SystemExit("\nStopped while waiting for the CSV")
+	except ValueError:  # --replay --latest on a folder without CSV
+		raise SystemExit(f"No CSV in {args.latest}")
 	voxel = config["preprocessing"]["downsampling"]["voxel_size"]
 
 	out = args.out or os.path.join(on["output_dir"], datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))

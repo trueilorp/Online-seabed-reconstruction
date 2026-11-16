@@ -5,6 +5,8 @@ clouds and evaluates it against a known ground truth. It compares
 **Poisson** surface reconstruction (Open3D) and **PPSurf** (neural,
 pretrained), each on the full scan and with a **sliding window** (SW) that
 processes the scan in windows of pings, as it would arrive during a survey.
+An online version of the Poisson pipeline reconstructs the seabed while a Unity
+simulation acquires it over a real seabed of the Venice Lagoon (section 4).
 
 This README covers installation and usage. Method, results and diagnostic
 experiments are in the project report, [report.pdf](report.pdf);
@@ -15,14 +17,15 @@ the experiment notes are in [ANALYSIS.md](ANALYSIS.md).
 1. [Installation](#1-installation)
 2. [Synthetic data](#2-synthetic-data)
 3. [Usage](#3-usage)
-4. [Contacts](#contacts)
+4. [Online reconstruction from Unity](#4-online-reconstruction-from-unity)
+5. [Contacts](#contacts)
 
 ## 1. Installation
 
-The git repository contains only the code: the neural repository
-(`neural_methods/`), the data (`data/synthetic/`) and the results (`output/`)
-are excluded and must be recreated. Run every command from the repository
-root.
+The git repository contains the code and the real-seabed patch of section 4
+(`data/real/patch_malamocco/`); the neural repository (`neural_methods/`), the
+synthetic data (`data/synthetic/`) and the results (`output/`) are excluded and
+must be recreated. Run every command from the repository root.
 
 ### 1.1 Prerequisites
 
@@ -73,7 +76,7 @@ The pretrained PPSurf weights (`ppsurf_50nn`) are downloaded automatically by
 conda create -n ricostruzione3d python=3.10 -y
 conda activate ricostruzione3d
 pip install -r requirements.txt
-pip install psutil          # optional: without it, the RAM peak (ram_picco_mb) is not recorded
+pip install psutil          # optional: without it, the RAM peak (peak_ram_mb) is not recorded
 
 # PPSurf
 conda env create -f neural_methods/ppsurf/pps.yml
@@ -204,19 +207,123 @@ top of the file):
 python visualization/visualize_mesh.py
 ```
 
-## Online reconstruction from Unity
-Start the simulation in Unity (add link to the repo unity used=), which writes the point cloud
-to a CSV (`x,y,z,intensity,ping_number,elapsed_s`, Y up) while it runs, then read that CSV as it grows:
+## 4. Online reconstruction from Unity
+
+<!-- TODO: link to the Unity project -->
+A Unity simulation drives a boat over a real seabed (the Malamocco patch of the Venice Lagoon) and records the
+sensor returns (a VLP-16 used as a proxy of a multibeam sonar) to a CSV while it runs. The mesh of the seabed is
+reconstructed with Poisson **while the CSV grows**, then evaluated against the real bathymetry and rendered
+as a video.
+
+### 4.1 Ground truth and Unity scene
+
+The patch used in the experiments is already in the repository, in `data/real/patch_malamocco/` (256 × 256 m,
+1 m cells): the Unity heightmap (`heightmap_257.raw`), the ground-truth mesh (`gt_mesh.ply`), the mask of the
+cells with real data (`valid_mask.npy`) and the Terrain parameters (`meta.json`).
+
+To cut another patch, download the lagoon DTM (MGDS, [doi:10.1594/IEDA/323605](https://doi.org/10.1594/IEDA/323605),
+ESRI ASCII; the 421 MB `iim_malamocco.asc` is not in the repository) into `data/real/` and run
+`data/real/venice_to_unity.py` (without `--center` it picks the patch with the most valid cells and relief):
 
 ```bash
-python online_reconstruction.py --latest "/mnt/c/Users/<user>/.../Recordings" --view # newest CSV in the folder with a live 3D window
-python online_reconstruction.py --csv <scan.csv> --replay --speed 4             # replay a finished recording
+python data/real/venice_to_unity.py data/real/iim_malamocco.asc --out data/real/patch_malamocco --size 256
 ```
 
-Points are accumulated in a 0.5 m voxel map; every `online.update_every_pings` pings (default 5) the area
-covered by the new pings is rebuilt with the Poisson pipeline and replaces that part of the mesh. The run stops
-after `online.idle_timeout_s` without new data (or with Ctrl+C) and writes, in `output/online/<date_time>/`,
-`mesh.ply` (rewritten at each update), `updates.csv` (latency and RTF per update), `config.txt` and `log.txt`.
+Frames:
+
+| Data | Frame |
+|---|---|
+| `gt_mesh.ply` | local ENU: x east, y north, z up = absolute DTM elevation; origin at the SW corner of the patch |
+| Unity CSV and every online mesh | Unity world: X, **Y up**, Z north |
+
+
+### 4.2 Reconstruction while Unity runs
+
+Launch it before or after putting the scene in Play: with `--latest` it waits until a CSV modified after the
+launch appears in the folder; with `--csv` it waits for
+that file to exist.
+
+```bash
+python online_reconstruction.py --latest "/mnt/c/Users/<user>/.../Recordings"          # waits for the new CSV
+python online_reconstruction.py --latest "/mnt/c/Users/<user>/.../Recordings" --view   # also a live 3D window
+python online_reconstruction.py --csv <scan.csv> --replay --speed 4                    # replay a finished recording
+```
+
+Pipeline of each update:
+
+1. **Reading.** The CSV (`x,y,z,intensity,ping_number,elapsed_s`, ~1 ping/s, ~21k points per ping) is tailed:
+   only the newly appended complete lines are read, never the whole file again.
+2. **Batching.** Rows are grouped into batches of `online.update_every_pings` complete pings (default 5); a ping
+   is complete when the next one starts.
+3. **Voxel map.** The batch is added to a map of 0.5 m voxels (`preprocessing.downsampling.voxel_size`) that keeps
+   the running centroid of each voxel; repeated passes over the same area are averaged.
+4. **Region.** The plan-view (XZ) box covered by the batch, plus `online.margin` (2.5 m), selects the map voxels
+   given to Poisson (including older data in that area).
+5. **Poisson**, same steps as the offline pipeline: statistical outlier removal (20 neighbours, 2σ), normals on the
+   30 nearest neighbours oriented up (+Y), Poisson depth 9 on `online.poisson_threads` threads, removal of the 5%
+   lowest-density vertices, mesh cleanup, removal of the triangles farther than 1 m from the points.
+6. **Merge.** The rebuilt region (cut to the box) replaces the triangles of the merged mesh inside the box.
+7. **Write.** `mesh.ply` is rewritten atomically (a reader never sees half a file); a copy goes to `meshes/`.
+
+The run stops after `online.idle_timeout_s` (15 s) without new data, or with Ctrl+C. Output in
+`output/online/<date_time>/`:
+
+| File | Content |
+|---|---|
+| `mesh.ply` | latest merged mesh (Unity frame) |
+| `meshes/mesh_<update>.ply` | the mesh after each update (`--save-every`, `online.snapshot_every`) |
+| `updates.csv` | one row per update: pings, `elapsed_s` (simulation time of the last point), voxels, box, triangles, `latency_s` (batch complete → mesh written), `budget_s`, `rtf` = latency / budget, time of each phase (`t_read` … `t_snapshot`), `arrived_unix_s` / `ready_unix_s` (wall clock) |
+| `config.txt`, `log.txt` | CSV path, effective config, console output |
+
+### 4.3 Metrics against the ground truth
+
+```bash
+python evaluate_online.py output/online/<run> --tau 0.2 0.3 0.4 0.5
+```
+
+Moves the ground truth into the Unity frame (`--terrain-position`, default −128 −128), keeps the cells with real
+DTM data and, for each snapshot, the area seen by the sensor up to that time (cells within `--coverage-radius`,
+1 m, of a CSV point). Chamfer, precision, recall and F-score at each τ are computed as in `evaluate.py` and written
+to `<run>/metrics_online.csv` (one row per snapshot and τ); `gt_covered.ply` is the ground truth of the last
+snapshot, to check the alignment visually. A median reconstruction→GT distance above 2 m is flagged as a
+probable misalignment.
+
+### 4.4 Report figures and tables
+
+```bash
+python visualization/plot_online.py output/online/<run>
+```
+
+Writes to `imgs/` the figures of the report section on the online reconstruction (`online_quality.png`: F-score
+and Chamfer per update; `online_timing.png`: latency per update split by phase; `online_plan.png`: plan view of
+the area seen by the sensor, covered by the mesh and left uncovered), and to `report/tables/` the summary table
+(`online.tex`) and the numbers quoted in the text (`online_values.tex`, LaTeX macros), so figures, table and text
+always come from the same run. Needs `metrics_online.csv` with τ = 0.2 and 0.5 m (section 4.3).
+
+### 4.5 Video and GIF
+
+```bash
+python video/render_video.py --run output/online/<run> --unity-video <Recordings/Movie_XXX.mp4> --preview
+python video/render_video.py --run output/online/<run> --unity-video <Recordings/Movie_XXX.mp4>
+python visualization/online_gif.py output/online/<run>
+```
+
+`render_video.py` writes a 1920×1080 H.264 video to `output/video/video_<date_time>.mp4` (`--out` for another
+path); with `--preview` it writes only three frames (10%, 50%, 95% of the session), the title card and the
+summary to `output/video/preview_<run>/`. The CSV is read from `<run>/config.txt` (`--csv` to override) and
+`metrics_online.csv` must contain τ = 0.2 and 0.5 m. Layout, on a common clock (`elapsed_s`, simulation time):
+
+- top: the Unity recording (`--unity-video`, centre-cropped), the point cloud acquired so far (coloured by
+  depth for the last `online.update_every_pings` pings, grey before, the newest ping in white) and the online
+  mesh, with the same camera fitted on the final mesh and vertical exaggeration `--zexag` (default 2);
+- bottom: a plan view (GT hillshade, area covered by the mesh, boat track as the centre of each ping
+  footprint, box rebuilt at the last update) and F-score, Chamfer and latency per update with a time cursor;
+- a title card at the start and a summary table at the end.
+
+The mesh shown at time t is the latest one already **ready** at t. The wall-clock timestamps of `updates.csv`
+are mapped to the simulation clock (Unity can run slower than real time), so the mesh delay shown is on the same
+clock as the video. The values behind the plots and the summary are written to `<run>/metrics_per_update.csv`.
+`online_gif.py` makes a GIF of the snapshots alone (`<run>/online.gif`).
 
 ## Contacts
 

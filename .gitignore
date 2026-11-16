@@ -1,10 +1,9 @@
 output/
-helpers/
 neural_methods/
 *__pycache__/
-data/
-meshes_pc_verona/
+data/*
+!data/real/
+data/real/*.asc
 benchmark/benchmark_output/
 docs/
 report/
-scan_20261114_102506.csv
