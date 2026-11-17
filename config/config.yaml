@@ -62,7 +62,7 @@ evaluation:
 # the new points is rebuilt with Poisson (same outlier removal, normals, Poisson and crop as above) and replaces
 # that part of the mesh.
 online:
-  update_every_pings: 5              # pings between two mesh updates (Unity: ~1 ping/s, ~22k points each)
+  update_every_pings: 5              # pings between two mesh updates (Unity: ~1 ping/s, ~19k points each)
   margin: 2.5                        # map points around the updated box also given to Poisson, then cropped away, m
   poisson_threads: 4                 # Poisson threads (-1 = all cores: with Unity running 25 s instead of 2 s per update,
                                      # see benchmark/poisson_threads.py; same mesh with any value)

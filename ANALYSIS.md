@@ -67,7 +67,7 @@ GTX 1650 with 4 GB, 3 repetitions:
 | PPSurf | library start-up + CUDA | 4–10 s | ~690 MB | – |
 | PPSurf | full `pps.py rec` | ~170 s | ~1.6 GB | ~1.9 GB |
 
-PPSurf costs about 15–20 times Poisson, and its time depends on the marching-cubes grid, not on the number of
+PPSurf costs about 10–20 times Poisson, and its time depends on the marching-cubes grid, not on the number of
 points. The timing CSV also holds Chamfer and F-score of these runs, but they predate the Poisson normals
 fix: for quality, the tables below apply.
 
@@ -120,7 +120,7 @@ all variants on the inner 20 m square. Chamfer in metres:
 | rocky_012 | 0.292 | 0.326 | 0.111 | **0.093** | 0.047 |
 | **Mean** | 0.349 | 0.317 | 0.110 | **0.061** | 0.039 |
 
-On the crop the shell drops from 0.9–1.2 m to 0.25–0.34 m, and with the middle layer PPSurf reaches Poisson.
+On the crop the shell drops from 0.9–1.2 m to 0.25–0.34 m, and with the middle layer PPSurf approaches Poisson.
 But the crop reduces both the cell and the scene extent, so this test alone does not say which one matters.
 
 **The test that separates the two effects**: a finer grid on the whole terrain (GTX TITAN X with 12 GB, val
@@ -154,8 +154,8 @@ terrains, TITAN X:
 | **tiled, middle layer** | **0.086 m** | 0.99 | 0.99 | **0.99** | 0.28 m |
 | Poisson | 0.048 m | 1.00 | 1.00 | 1.00 | – |
 
-At τ = 0.5 m tiled PPSurf is on par with Poisson. Its Chamfer is still about 1.8 times Poisson's, but the
-whole gap lies below the threshold. The middle layer adds little and, being 2.5D, erases pipes and pillars:
+At τ = 0.5 m tiled PPSurf is on par with Poisson. Its Chamfer is still about 2.5 times Poisson's (1.8 with the
+middle layer), but the whole gap lies below the threshold. The middle layer adds little and, being 2.5D, erases pipes and pillars:
 `tile_original` is the variant to keep.
 
 **Cost remains the obstacle**: ~17 min per terrain (~41 s per square, set by the grid) against ~7 s for

@@ -209,8 +209,7 @@ python visualization/visualize_mesh.py
 
 ## 4. Online reconstruction from Unity
 
-<!-- TODO: link to the Unity project -->
-A Unity simulation drives a boat over a real seabed (the Malamocco patch of the Venice Lagoon) and records the
+A Unity simulation ([Online-seabed-reconstruction-UNITY](https://github.com/trueilorp/Online-seabed-reconstruction-UNITY)) drives a boat over a real seabed (the Malamocco patch of the Venice Lagoon) and records the
 sensor returns (a VLP-16 used as a proxy of a multibeam sonar) to a CSV while it runs. The mesh of the seabed is
 reconstructed with Poisson **while the CSV grows**, then evaluated against the real bathymetry and rendered
 as a video.
@@ -251,7 +250,7 @@ python online_reconstruction.py --csv <scan.csv> --replay --speed 4             
 
 Pipeline of each update:
 
-1. **Reading.** The CSV (`x,y,z,intensity,ping_number,elapsed_s`, ~1 ping/s, ~21k points per ping) is tailed:
+1. **Reading.** The CSV (`x,y,z,intensity,ping_number,elapsed_s`, ~1 ping/s, ~19k points per ping) is tailed:
    only the newly appended complete lines are read, never the whole file again.
 2. **Batching.** Rows are grouped into batches of `online.update_every_pings` complete pings (default 5); a ping
    is complete when the next one starts.
@@ -288,7 +287,7 @@ to `<run>/metrics_online.csv` (one row per snapshot and τ); `gt_covered.ply` is
 snapshot, to check the alignment visually. A median reconstruction→GT distance above 2 m is flagged as a
 probable misalignment.
 
-### 4.4 Report figures and tables
+### 4.4 Report figures
 
 ```bash
 python visualization/plot_online.py output/online/<run>
@@ -297,9 +296,8 @@ python visualization/plot_online.py output/online/<run>
 Writes to `imgs/` the figures of the report section on the online reconstruction (`online_quality.png`: F-score
 and Chamfer per update; `online_timing.png`: latency per update split by phase; `online_plan.png`: plan view of
 the area seen by the sensor, covered by the mesh and left uncovered; `online_mesh.png`: screenshot of the final
-mesh, vertical exaggeration `--zexag`, default 2), and to `report/tables/` the summary table
-(`online.tex`) and the numbers quoted in the text (`online_values.tex`, LaTeX macros), so figures, table and text
-always come from the same run. Needs `metrics_online.csv` with τ = 0.2 and 0.5 m (section 4.3).
+mesh, vertical exaggeration `--zexag`, default 2). Needs `metrics_online.csv` with τ = 0.2 and 0.5 m
+(section 4.3).
 
 ### 4.5 Video and GIF
 

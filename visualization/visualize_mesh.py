@@ -10,7 +10,7 @@ os.environ["XDG_SESSION_TYPE"] = "x11"
 import numpy as np
 import open3d as o3d
 
-MESH_PATH = "new_mesh_ppsurf_sw/rocky_012_ppsurf_sw.ply"
+MESH_PATH = "..."
 SHOW_WIREFRAME = False
 SCREENSHOT_FOLDER = "output/screenshots_mesh"
 
